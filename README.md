@@ -6,11 +6,13 @@ without rewriting the watcher for every agent CLI.
 
 One executable emits events, one durable spool holds them, thin generated
 adapters deliver them per harness. The normative contract every watcher and
-adapter agrees on is [`docs/event-contract.md`](docs/event-contract.md).
+adapter agrees on is [`docs/event-contract.md`](docs/event-contract.md), and
+the command names it reserves are frozen in
+[`docs/cli-surface.md`](docs/cli-surface.md).
 
 **Status:** early development. The contract, its schemas, the golden fixture
-corpus, the parse profile that reads them, and the build scaffold — no runtime
-behaviour yet.
+corpus, the parse profile that reads them, the frozen CLI surface, and the
+build scaffold — no runtime behaviour yet.
 
 ## Development
 
