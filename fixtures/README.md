@@ -47,11 +47,12 @@ name and is rejected by the schema, one step before cross-entry detection
 would apply — the validator's own alias rule stays defence in depth for input
 that has not been through the schema yet.
 
-Two corpora are missing here on purpose, and are not yet provided anywhere:
-the >16 MiB supervision-window stream (§Overflow) and duplicate replay sets
-larger than any in-memory cache (§Spool and cursors). Both are too large to
-commit, so they will be produced deterministically by a generator that
-arrives with the code that needs them.
+Two corpora are missing here on purpose: the >16 MiB supervision-window
+stream (§Overflow) and duplicate replay sets larger than any in-memory
+cache (§Spool and cursors). Both are too large to commit, so they are
+produced on demand by `internal/fixturegen`, whose output depends only on
+its arguments — never on time or randomness — so every run reproduces
+identical bytes.
 
 | Fixture | Contract anchor | Expectation |
 | :-- | :-- | :-- |
