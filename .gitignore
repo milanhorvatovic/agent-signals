@@ -1,0 +1,5 @@
+# macOS metadata
+.DS_Store
+
+# Runtime spool state (events, cursors, locks, PID files) — never committed
+.agent/
