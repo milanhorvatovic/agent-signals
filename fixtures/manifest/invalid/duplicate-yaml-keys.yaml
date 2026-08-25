@@ -1,0 +1,6 @@
+- name: pr-comments
+  name: pr-comments-again
+  command: ["./watchers/pr-comments.sh"]
+  description: duplicate mapping key in one entry
+  trigger: session-start
+  tiers: [mcp]

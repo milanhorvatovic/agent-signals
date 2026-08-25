@@ -1,0 +1,1 @@
+{"id":"agent-signals:synthetic:gap:forged","ts":"2026-08-24T09:12:03Z","source":"pr-comments","kind":"gap","severity":"warn","summary":"watchers must not emit the reserved prefix"}

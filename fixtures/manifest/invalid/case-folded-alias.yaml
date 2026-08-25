@@ -1,0 +1,10 @@
+- name: pr-comments
+  command: ["./watchers/pr-comments.sh"]
+  description: first
+  trigger: session-start
+  tiers: [mcp]
+- name: PR-COMMENTS
+  command: ["./watchers/pr-comments-2.sh"]
+  description: case-folded alias on a case-insensitive filesystem
+  trigger: session-start
+  tiers: [mcp]

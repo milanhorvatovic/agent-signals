@@ -1,0 +1,1 @@
+{"id":"agent-signals:synthetic:overflow:ci-status:000003","ts":"2026-08-24T09:12:03Z","source":"ci-status","kind":"overflow","severity":"warn","summary":"dropped 1 event: pending byte cap exceeded","data":{"reason":"pending_bytes_exceeded","dropped_ids_known":true,"dropped_count":1,"first_dropped_id":"ci-103","last_dropped_id":"ci-103"}}

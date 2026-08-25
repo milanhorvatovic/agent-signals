@@ -1,0 +1,3 @@
+{"id":"pr-1","ts":"2026-08-24T09:12:03Z","source":"pr-comments","kind":"review_comment","severity":"info","summary":"comment one"}
+{"id":"pr-2","ts":"2026-08-24T09:12:03Z","source":"pr-comments","kind":"review_comment","severity":"info","summary":"comment two"}
+{"id":"agent-signals:synthetic:overflow:pr-comments:000001","ts":"2026-08-24T09:12:03Z","source":"pr-comments","kind":"overflow","severity":"warn","summary":"dropped 2 events: pending byte cap exceeded","data":{"reason":"pending_bytes_exceeded","dropped_ids_known":true,"dropped_count":2,"first_dropped_id":"pr-3","last_dropped_id":"pr-4"}}

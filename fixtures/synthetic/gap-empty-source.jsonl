@@ -1,0 +1,1 @@
+{"id":"agent-signals:synthetic:gap:baf3eb6619129e1277f2469bbd87c49fbaff087acbbe923f8b3e3521e30d5914","ts":"2026-08-24T09:30:00Z","source":"pr-comments","kind":"gap","severity":"warn","summary":"events after - were removed by retention; none retained","data":{"cursor_id":"mcp/build-agent-main/pr-comments","last_id":null,"last_removed_id":"pr-0009"}}

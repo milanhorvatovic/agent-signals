@@ -1,0 +1,10 @@
+- name: pr-comments
+  command: ["./watchers/pr-comments.sh"]
+  description: first
+  trigger: session-start
+  tiers: [mcp]
+- name: pr-comments
+  command: ["./watchers/pr-comments-2.sh"]
+  description: duplicate source name
+  trigger: session-start
+  tiers: [mcp]

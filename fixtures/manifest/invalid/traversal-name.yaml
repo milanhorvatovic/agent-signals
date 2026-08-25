@@ -1,0 +1,5 @@
+- name: ../../etc/passwd
+  command: ["./watchers/x.sh"]
+  description: path traversal in the source name
+  trigger: session-start
+  tiers: [mcp]

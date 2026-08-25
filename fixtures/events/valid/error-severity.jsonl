@@ -1,0 +1,1 @@
+{"id":"evt-err-1","ts":"2026-08-24T09:12:03Z","source":"file-tail","kind":"log_line","severity":"error","summary":"panic: nil pointer dereference in worker 3"}

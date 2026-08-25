@@ -1,0 +1,1 @@
+{ "data": {"ratio": 1.50, "pr": 4821, "line": 142},   "summary":"reviewer requested null check", "severity":"info", "kind":"review_comment", "source":"pr-comments", "ts":"2026-08-24T09:12:03Z", "id":"evt-canon-1" }
