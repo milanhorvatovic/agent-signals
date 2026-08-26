@@ -1,6 +1,7 @@
 # Watcher manifest — the single source of truth (docs/event-contract.md
-# §Manifest). Schema: schemas/monitors.schema.json. Adapter files under
-# adapters/ are generated from this file and must not be hand-edited.
+# §Manifest). Its schema will live at schemas/monitors.schema.json, and
+# adapter files under adapters/ will be generated from this file — never
+# hand-edited.
 #
 # No sources are configured yet.
 []
