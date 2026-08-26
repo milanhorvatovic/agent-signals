@@ -16,11 +16,11 @@
           "$ref": "#/$defs/eventId"
         },
         "ts": {
-          "description": "RFC 3339 UTC restricted to the exact profile YYYY-MM-DDTHH:MM:SSZ — whole seconds only; numeric offsets and fractional seconds are rejected, so one instant has exactly one encoding and a retry can never differ in precision. The 20-scalar length pins reject a trailing line terminator on any regex engine, independent of its $ semantics (event-contract.md §Event).",
+          "description": "RFC 3339 UTC restricted to the exact profile YYYY-MM-DDTHH:MM:SSZ — whole seconds only; numeric offsets and fractional seconds are rejected, so one instant has exactly one encoding and a retry can never differ in precision. The 20-scalar length pins reject a trailing line terminator on any regex engine, independent of its $ semantics. The pattern asserts per-field ranges (month 01-12, day 01-31, hour 00-23, minute/second 00-59); full calendar validity (month lengths, leap years) is the format assertion's job — format is annotation-only under the default 2020-12 vocabulary, so a conforming validator must compile this schema with format assertion enabled (event-contract.md §Event).",
           "type": "string",
           "minLength": 20,
           "maxLength": 20,
-          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$",
           "format": "date-time"
         },
         "source": {
@@ -235,6 +235,15 @@
                   },
                   "else": {
                     "properties": { "dropped_ids_known": { "const": true } }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": { "fingerprint_scope": { "const": "prefix" } },
+                    "required": ["fingerprint_scope"]
+                  },
+                  "then": {
+                    "properties": { "reason": { "const": "line_limit_exceeded" } }
                   }
                 }
               ]
