@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/milanhorvatovic/agent-signals/schemas/event.schema.json",
   "title": "agent-signals event",
-  "description": "One event object per JSONL line on a watcher's stdout. Normative source: event-contract.md §Event and §Watcher requirements. The root schema validates watcher input, which must not use the reserved synthetic ID prefix; service-generated records validate against $defs/syntheticEvent. Enforced by the parse profile before JSON decoding, not by this schema: the raw per-line byte bound (manifest max_event_bytes, including the trailing newline), duplicate object key rejection, unpaired-surrogate rejection, and the depth-64 nesting cap. The ~120-character summary target from §Why `summary` is constrained is a lint warning, not a schema constraint.",
+  "description": "One event object per JSONL line on a watcher's stdout. Normative source: event-contract.md §Event and §Watcher requirements. The root schema validates watcher input, which must not use the reserved synthetic ID prefix; service-generated records validate against $defs/syntheticEvent. Enforced by the parse profile before JSON decoding, not by this schema: the raw per-line byte bound (manifest max_event_bytes, including the trailing newline), duplicate object key rejection, unpaired-surrogate rejection, and the depth-64 nesting cap. The ~120-character summary target from §Why `summary` is constrained is a lint warning, not a schema constraint. Anchoring: patterns here are ECMA-262 per the JSON Schema spec, where an unflagged $ is a strict end-of-input assertion — as it is in the service's pinned Go engine — satisfying §Event's full-string rule; \\A/\\z are not expressible in the ECMA dialect, so a consumer whose engine lets $ match before a trailing line terminator (for example Python's re) must substitute its strict end anchor when reusing these patterns.",
   "$ref": "#/$defs/watcherEvent",
   "$defs": {
     "baseEvent": {
@@ -16,8 +16,10 @@
           "$ref": "#/$defs/eventId"
         },
         "ts": {
-          "description": "RFC 3339 UTC restricted to the exact profile YYYY-MM-DDTHH:MM:SSZ — whole seconds only; numeric offsets and fractional seconds are rejected, so one instant has exactly one encoding and a retry can never differ in precision (event-contract.md §Event).",
+          "description": "RFC 3339 UTC restricted to the exact profile YYYY-MM-DDTHH:MM:SSZ — whole seconds only; numeric offsets and fractional seconds are rejected, so one instant has exactly one encoding and a retry can never differ in precision. The 20-scalar length pins reject a trailing line terminator on any regex engine, independent of its $ semantics (event-contract.md §Event).",
           "type": "string",
+          "minLength": 20,
+          "maxLength": 20,
           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
           "format": "date-time"
         },
@@ -204,10 +206,23 @@
                     "properties": { "dropped_ids_known": { "const": true } }
                   },
                   "then": {
-                    "required": ["dropped_count", "first_dropped_id", "last_dropped_id"]
+                    "required": ["dropped_count", "first_dropped_id", "last_dropped_id"],
+                    "not": {
+                      "anyOf": [
+                        { "required": ["fingerprint"] },
+                        { "required": ["fingerprint_scope"] }
+                      ]
+                    }
                   },
                   "else": {
-                    "required": ["fingerprint", "fingerprint_scope"]
+                    "required": ["fingerprint", "fingerprint_scope"],
+                    "not": {
+                      "anyOf": [
+                        { "required": ["dropped_count"] },
+                        { "required": ["first_dropped_id"] },
+                        { "required": ["last_dropped_id"] }
+                      ]
+                    }
                   }
                 },
                 {
