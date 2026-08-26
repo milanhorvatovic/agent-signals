@@ -13,10 +13,7 @@
       "properties": {
         "id": {
           "description": "Stable across retry and unique within its source — event identity is the pair (source, id); never derived from wall-clock time or an in-memory counter. Bounded and line-safe because IDs are interpolated into synthetic record IDs and summaries (event-contract.md §Event).",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256,
-          "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
+          "$ref": "#/$defs/eventId"
         },
         "ts": {
           "description": "RFC 3339 UTC restricted to the exact profile YYYY-MM-DDTHH:MM:SSZ — whole seconds only; numeric offsets and fractional seconds are rejected, so one instant has exactly one encoding and a retry can never differ in precision (event-contract.md §Event).",
@@ -54,6 +51,13 @@
         }
       }
     },
+    "eventId": {
+      "description": "An event ID under §Event's bounds: at most 256 Unicode scalar values, no control characters or Unicode line separators. Synthetic record data references event IDs, so the same bounds apply there (event-contract.md §Event, §Rotation, §Overflow).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
+    },
     "projectionMarker": {
       "description": "The exact reserved object {\"$projected\": true} that delivery substitutes for an oversized event's data. Watcher input whose data equals exactly this value is rejected — the same reservation as the synthetic ID prefix — so a full payload can never masquerade as a projection (event-contract.md §Delivery transaction).",
       "type": "object",
@@ -83,7 +87,7 @@
       ]
     },
     "gapEvent": {
-      "description": "Generated per cursor at delivery time when retention removed events past that cursor — never appended to the shared spool; repeats byte-identically with the same ID until acknowledged (event-contract.md §Rotation).",
+      "description": "Generated per cursor at delivery time when retention removed events past that cursor — never appended to the shared spool; repeats byte-identically with the same ID until acknowledged. The retained and empty-source variants are exclusive: the `resuming from` summary requires first_available_id in data, the `none retained` summary forbids it and requires the tombstone's last_removed_id (event-contract.md §Rotation).",
       "allOf": [
         { "$ref": "#/$defs/baseEvent" },
         {
@@ -94,44 +98,69 @@
             },
             "kind": { "const": "gap" },
             "severity": { "const": "warn" },
-            "summary": {
-              "description": "Exactly `events after <last_id> were removed by retention; resuming from <first_available_id>`, or the `…; none retained` tail when retention emptied the source; <last_id> renders as the literal `-` when null, and over-long IDs use the deterministic truncation from event-contract.md §Rotation.",
-              "pattern": "^events after .+ were removed by retention; (resuming from .+|none retained)$"
-            },
             "data": {
               "type": "object",
               "required": ["cursor_id", "last_id"],
               "additionalProperties": false,
               "properties": {
                 "cursor_id": {
-                  "description": "The string <consumer>/<instance>/<source> with the original opaque instance — informational rather than parseable (event-contract.md §Rotation).",
+                  "description": "The string <consumer>/<instance>/<source> with the original opaque instance — informational rather than parseable. Its components are bounded to 128, 256, and 128 scalars and are control-free, so the joined value is bounded to 514 (event-contract.md §Rotation, §Spool and cursors).",
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 514,
+                  "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
                 },
                 "last_id": {
-                  "description": "The cursor's acknowledged position, carried in full because the summary may truncate it; JSON null is the canonical before-everything position (event-contract.md §Rotation, §Cursor lifecycle).",
+                  "description": "The cursor's acknowledged position, carried in full because the summary may truncate it; JSON null is the canonical before-everything position. A non-null value is an event ID and carries §Event's bounds (event-contract.md §Rotation, §Cursor lifecycle).",
                   "type": ["string", "null"],
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
                 },
                 "last_removed_id": {
-                  "description": "Present when known (event-contract.md §Rotation).",
-                  "type": "string",
-                  "minLength": 1
+                  "description": "Present when known; the empty-source variant derives from the retention tombstone and always carries it (event-contract.md §Rotation).",
+                  "$ref": "#/$defs/eventId"
                 },
                 "first_available_id": {
-                  "description": "Present in the retained variant; the empty-source variant derives from the retention tombstone and omits it (event-contract.md §Rotation).",
-                  "type": "string",
-                  "minLength": 1
+                  "description": "Present exactly in the retained variant (event-contract.md §Rotation).",
+                  "$ref": "#/$defs/eventId"
                 }
               }
             }
           },
           "required": ["data"]
+        },
+        {
+          "oneOf": [
+            {
+              "description": "Retained variant: events remain after the removal, and the record resumes from the first of them (event-contract.md §Rotation).",
+              "properties": {
+                "summary": {
+                  "pattern": "^events after .+ were removed by retention; resuming from .+$"
+                },
+                "data": {
+                  "required": ["first_available_id"]
+                }
+              }
+            },
+            {
+              "description": "Empty-source variant: retention removed everything, the record derives from the retention tombstone, and there is no resume ID (event-contract.md §Rotation).",
+              "properties": {
+                "summary": {
+                  "pattern": "^events after .+ were removed by retention; none retained$"
+                },
+                "data": {
+                  "required": ["last_removed_id"],
+                  "not": { "required": ["first_available_id"] }
+                }
+              }
+            }
+          ]
         }
       ]
     },
     "overflowEvent": {
-      "description": "Appended to the spool when bounded supervision drops watcher output. Dropped IDs are carried when recoverable — only pending_bytes_exceeded drops can be — otherwise a streaming content fingerprint with its scope discriminator (event-contract.md §Overflow).",
+      "description": "Appended to the spool when bounded supervision drops watcher output. Dropped IDs are carried when recoverable — only pending_bytes_exceeded drops can be — otherwise a streaming content fingerprint with its scope discriminator. The summary is coupled to data: each reason selects its exact template, and the pending-cap form agrees with dropped_count in grammatical number (event-contract.md §Overflow).",
       "allOf": [
         { "$ref": "#/$defs/baseEvent" },
         {
@@ -143,7 +172,7 @@
             "kind": { "const": "overflow" },
             "severity": { "const": "warn" },
             "summary": {
-              "description": "Exactly one of the three templates in event-contract.md §Overflow, with `event` singular when dropped_count is 1.",
+              "description": "Exactly one of the three templates in event-contract.md §Overflow; the couplings below tie the template to data.reason and dropped_count.",
               "pattern": "^(dropped 1 event: pending byte cap exceeded|dropped ([2-9]|[1-9][0-9]+) events: pending byte cap exceeded|dropped an unparseable (oversized|malformed) line)$"
             },
             "data": {
@@ -157,18 +186,8 @@
                 },
                 "dropped_ids_known": { "type": "boolean" },
                 "dropped_count": { "type": "integer", "minimum": 1 },
-                "first_dropped_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 256,
-                  "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
-                },
-                "last_dropped_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 256,
-                  "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
-                },
+                "first_dropped_id": { "$ref": "#/$defs/eventId" },
+                "last_dropped_id": { "$ref": "#/$defs/eventId" },
                 "fingerprint": {
                   "description": "sha256: followed by the lowercase hex SHA-256 of the dropped line's raw bytes, computed streaming over the entire line (event-contract.md §Overflow).",
                   "type": "string",
@@ -207,6 +226,86 @@
             }
           },
           "required": ["data"]
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["reason"],
+                "properties": { "reason": { "const": "pending_bytes_exceeded" } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "pattern": "^dropped [0-9]+ events?: pending byte cap exceeded$" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["reason"],
+                "properties": { "reason": { "const": "line_limit_exceeded" } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "const": "dropped an unparseable oversized line" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["reason"],
+                "properties": { "reason": { "const": "malformed_line" } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "const": "dropped an unparseable malformed line" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["dropped_count"],
+                "properties": { "dropped_count": { "const": 1 } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "const": "dropped 1 event: pending byte cap exceeded" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["dropped_count"],
+                "properties": { "dropped_count": { "minimum": 2 } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "pattern": "^dropped ([2-9]|[1-9][0-9]+) events: pending byte cap exceeded$" }
+            }
+          }
         }
       ]
     }
