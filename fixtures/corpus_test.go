@@ -451,16 +451,16 @@ func contextDir(fixture string) string {
 	return filepath.Join("synthetic/context", strings.TrimSuffix(filepath.Base(fixture), ".jsonl"))
 }
 
-// contextEvent finds the watcher record a synthetic fixture derives from.
-func contextEvent(t *testing.T, fixture, source, id string) (map[string]any, bool) {
+// contextFirstEvent returns the oldest record of the context spool — the one
+// a retained gap resumes from. Searching the file for the ID instead would
+// only prove it appears somewhere: prepend an older record and the gap would
+// no longer resume from the first retained event, while its timestamp came
+// from a later one and every check stayed green.
+func contextFirstEvent(t *testing.T, fixture, source string) map[string]any {
 	t.Helper()
-	for _, line := range records(t, filepath.Join(contextDir(fixture), source+".jsonl")) {
-		rec, _ := decodeJSON(t, line).(map[string]any)
-		if rec["id"] == id {
-			return rec, true
-		}
-	}
-	return nil, false
+	lines := records(t, filepath.Join(contextDir(fixture), source+".jsonl"))
+	rec, _ := decodeJSON(t, lines[0]).(map[string]any)
+	return rec
 }
 
 // contextTombstone reads a retention state a gap derives from: "tombstone"
@@ -640,11 +640,12 @@ func TestGapIDsRecompute(t *testing.T) {
 			// ts is the first available event's timestamp, so the retained
 			// variant is only checkable against that event. Without the
 			// companion record any schema-valid ts would pass.
-			first, found := contextEvent(t, path, rec.Source, rec.Data.FirstAvailableID)
-			if !found {
-				t.Errorf("%s: no companion record for first_available_id %q; ts cannot be verified", path, rec.Data.FirstAvailableID)
-			} else if ts, _ := first["ts"].(string); ts != rec.TS {
-				t.Errorf("%s: ts is %q, the first available event %q is at %q", path, rec.TS, rec.Data.FirstAvailableID, ts)
+			first := contextFirstEvent(t, path, rec.Source)
+			if id, _ := first["id"].(string); id != rec.Data.FirstAvailableID {
+				t.Errorf("%s: resumes from %q, but the oldest retained event is %q", path, rec.Data.FirstAvailableID, id)
+			}
+			if ts, _ := first["ts"].(string); ts != rec.TS {
+				t.Errorf("%s: ts is %q, the first available event is at %q", path, rec.TS, ts)
 			}
 			// last_removed_id sits in neither the digest nor the summary, so
 			// it is anchored only by the retention state it reports.
@@ -1560,6 +1561,41 @@ func TestOverflowFixturesKeepTheirCase(t *testing.T) {
 		}
 		if rec.Data.DroppedCount != expected.count {
 			t.Errorf("%s: dropped_count is %d, want %d", name, rec.Data.DroppedCount, expected.count)
+		}
+	}
+}
+
+// TestGapFixturesKeepTheirCase pins which cursor position each gap fixture
+// carries. Both variants accept a null or a non-null last_id in general, so
+// the variant alone does not fix it — the empty-source fixture is the one
+// that renders null as the literal dash, and swapping in a real ID with a
+// matching summary would leave every other check satisfied while that
+// rendering stopped being covered anywhere.
+func TestGapFixturesKeepTheirCase(t *testing.T) {
+	wantNullLastID := map[string]bool{
+		"gap.jsonl":              false,
+		"gap-empty-source.jsonl": true,
+	}
+	for _, path := range glob(t, "synthetic/gap*.jsonl") {
+		name := filepath.Base(path)
+		wantNull, known := wantNullLastID[name]
+		if !known {
+			t.Errorf("%s: no documented cursor position; add one so the fixture cannot drift into a copy of the other", name)
+			continue
+		}
+		var rec struct {
+			Data struct {
+				LastID *string `json:"last_id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(records(t, path)[0], &rec); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		switch {
+		case wantNull && rec.Data.LastID != nil:
+			t.Errorf("%s: last_id is %q; this fixture carries the before-everything position that renders as a dash", name, *rec.Data.LastID)
+		case !wantNull && rec.Data.LastID == nil:
+			t.Errorf("%s: last_id is null; the other fixture already covers that position", name)
 		}
 	}
 }
