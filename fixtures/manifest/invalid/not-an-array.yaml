@@ -1,0 +1,2 @@
+pr-comments:
+  command: ["./watchers/pr-comments.sh"]

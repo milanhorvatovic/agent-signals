@@ -1,0 +1,13 @@
+- name: pr-comments
+  command: ["./watchers/pr-comments.sh"]
+  description: New PR review comments
+  trigger: on-skill-invoke:harvest
+  tiers: [mcp, prose]
+- name: ci-status
+  command: ["./watchers/ci-status.sh"]
+  description: CI status changes
+  trigger: session-start
+  tiers: [mcp]
+  severity_floor: warn
+  batch_size: 5
+  interval: 120

@@ -1,0 +1,5 @@
+- name: ci-status
+  command: ["./watchers/ci-status.sh", "--repo", "."]
+  description: CI status changes
+  trigger: session-start
+  tiers: [mcp]

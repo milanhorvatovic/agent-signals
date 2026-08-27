@@ -1,0 +1,5 @@
+- name: pr-comments
+  command: ["./watchers/pr-comments.sh"]
+  description: unknown tier name
+  trigger: session-start
+  tiers: [mcp, websocket]

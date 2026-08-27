@@ -1,0 +1,1 @@
+{"id":"agent-signals:synthetic:overflow:ci-status:000005","ts":"2026-08-24T09:12:03Z","source":"ci-status","kind":"overflow","severity":"warn","summary":"dropped an unparseable malformed line","data":{"reason":"malformed_line","dropped_ids_known":false,"fingerprint":"sha256:6ee5d0c838cc803f2ef115e3a0e6c6785469cb648131411a2e5a85eee4754f95","fingerprint_scope":"full"}}

@@ -1,0 +1,5 @@
+- name: pr-comments
+  command: ["./watchers/pr-comments.sh", ""]
+  description: an empty argv element is a valid argument
+  trigger: session-start
+  tiers: [mcp]

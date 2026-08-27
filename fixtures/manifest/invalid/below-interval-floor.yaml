@@ -1,0 +1,6 @@
+- name: pr-comments
+  command: ["./watchers/pr-comments.sh"]
+  description: hot-loop interval
+  trigger: session-start
+  tiers: [mcp]
+  interval: 1

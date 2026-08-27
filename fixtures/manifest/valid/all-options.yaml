@@ -1,0 +1,15 @@
+- name: pr-comments
+  command: ["./watchers/pr-comments.sh", "--repo", "."]
+  description: every optional field set to a non-default value
+  trigger: on-skill-invoke:harvest
+  tiers: [push, hook, mcp, prose]
+  follow: true
+  severity_floor: warn
+  batch_size: 50
+  max_event_bytes: 524288
+  interval: 30
+  rotate_bytes: 4194304
+  retention_bytes: 268435456
+  retention_age: 86400
+  cursor_grace: 259200
+  idle_timeout: 120
