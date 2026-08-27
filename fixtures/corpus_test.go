@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -242,6 +243,32 @@ func glob(t *testing.T, pattern string) []string {
 	return m
 }
 
+// slugPattern is the canonical lowercase slug grammar shared by a source and
+// a consumer (event-contract.md §Event, §Manifest).
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+
+// isControl reports the character class the contract excludes from every
+// line-safe field: C0, DEL, C1, and the Unicode line separators.
+func isControl(r rune) bool {
+	return r < 0x20 || r == 0x7F || (r >= 0x80 && r <= 0x9F) || r == 0x2028 || r == 0x2029
+}
+
+// matchesInDir returns the JSONL files in dir that belong to source's spool.
+func matchesInDir(t *testing.T, dir, source string) []string {
+	t.Helper()
+	found, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, path := range found {
+		if matchesSpool(path, source) {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
 // matchesSpool reports whether a JSONL file is part of the named source's
 // spool: <source>.jsonl for the active file, <source>.<digits>.jsonl for an
 // archive. The source is matched rather than inferred, because a valid slug
@@ -313,7 +340,20 @@ func TestWatcherFixturesValidate(t *testing.T) {
 				switch {
 				case synth && err == nil:
 					t.Errorf("%s line %d: synthetic ID accepted as watcher input", path, i+1)
-				case !synth && err != nil:
+				case synth && !p.perSource:
+					// Rejection by the watcher schema is not coverage. These
+					// files hold watcher input only, so a reserved-prefix ID
+					// here is malformed rather than exempt — and it would
+					// otherwise be checked against no synthetic schema at all.
+					t.Errorf("%s line %d: %q carries the reserved prefix; this fixture holds watcher input", path, i+1, recordID(inst))
+				case synth:
+					// A spool legitimately mixes watcher records with
+					// service-generated ones, so those are held to the
+					// synthetic schema rather than merely waved through.
+					if synthErr := s.synthetic.Validate(inst); synthErr != nil {
+						t.Errorf("%s line %d: spooled synthetic record is invalid: %v", path, i+1, synthErr)
+					}
+				case err != nil:
 					t.Errorf("%s line %d: %v", path, i+1, err)
 				}
 				if !p.perSource {
@@ -633,6 +673,17 @@ func TestGapIDsRecompute(t *testing.T) {
 			t.Fatalf("%s: cursor_id %q is not <consumer>/<instance>/<source>", path, rec.Data.CursorID)
 		}
 		consumer, source := rec.Data.CursorID[:head], rec.Data.CursorID[tail+1:]
+		// Both components go into the digest, so a cursor identity no
+		// conforming service could hold would produce a reproducible ID for a
+		// cursor that cannot exist. The consumer is a slug under the same
+		// grammar and bound as the source; the instance is opaque but still
+		// non-empty, bounded, and control-free.
+		if !slugPattern.MatchString(consumer) || len([]rune(consumer)) > 128 {
+			t.Errorf("%s: cursor_id consumer %q is not a canonical slug within 128 scalars", path, consumer)
+		}
+		if opaque := rec.Data.CursorID[head+1 : tail]; opaque == "" || len([]rune(opaque)) > 256 || strings.ContainsFunc(opaque, isControl) {
+			t.Errorf("%s: cursor_id instance %q is empty, over 256 scalars, or carries a control character", path, opaque)
+		}
 		// The digest is derived from the cursor's source, so a record whose
 		// own source disagrees would carry an ID belonging to a different
 		// stream — reproducible, and wrong for the event it is attached to.
@@ -679,6 +730,13 @@ func TestGapIDsRecompute(t *testing.T) {
 			// rather than from the record, because deriving from the record's
 			// own ts would be circular — editing ts and recomputing the ID
 			// would agree with itself and prove nothing.
+			// "none retained" has to be true of the committed context, not
+			// only asserted by the record: a spool file for this source under
+			// the empty variant's context would pass the general fixture scan
+			// while contradicting the very claim this variant makes.
+			for _, spooled := range matchesInDir(t, contextDir(path), rec.Source) {
+				t.Errorf("%s: claims none retained, but %s holds records for that source", path, spooled)
+			}
 			removedID, removedAt := contextTombstone(t, path, rec.Source, "tombstone")
 			// A null last_id only takes the gap path when the tombstone has
 			// advanced past the baseline the cursor recorded at creation.
