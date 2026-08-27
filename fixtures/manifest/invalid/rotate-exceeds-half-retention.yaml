@@ -1,0 +1,7 @@
+- name: pr-comments
+  command: ["./watchers/pr-comments.sh"]
+  description: rotation threshold above half the retention ceiling
+  trigger: session-start
+  tiers: [mcp]
+  rotate_bytes: 8388608
+  retention_bytes: 8388608

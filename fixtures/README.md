@@ -13,7 +13,7 @@ from their canonical derivation arrays, and `same.sha256` from the committed
 canonical bytes. Fixtures whose expectation the schema cannot express are
 asserted against that expectation directly rather than skipped, so a skip can
 never stand in for coverage: `duplicate-keys.jsonl` must still repeat a member
-name, `duplicate-source.yaml` must still collide, `same-{a,b}.jsonl` must
+name, `duplicate-source.yaml` must still collide and `rotate-exceeds-half-retention.yaml` must still break its ratio, `same-{a,b}.jsonl` must
 still decode to what `same.canonical` describes, the number-lexeme pair must
 stay distinguishable, and every optional manifest field must be set by some
 valid fixture.
@@ -67,7 +67,7 @@ arrives with the code that needs them.
 | `events/canonical/conflict-{a,b}.jsonl` | §Spool duplicate vs conflict | same ID, different digest — hard conflict |
 | `events/limits/*` | §Manifest `max_event_bytes`, §Watcher requirement 1 | `exact-limit` (1024 B incl. newline, per `limits.json`) ingests; `over-limit` is one byte longer and rejects before JSON decoding. 1024 is the contract floor for `max_event_bytes`, so this is the smallest boundary a conforming source can configure; the padding sits in `data`, since `summary` is capped at 512 scalars |
 | `manifest/valid/*.yaml` | §Manifest | validate; the minimal fixtures leave optionals absent to take defaults, and `all-options` sets every one of them to a non-default value. `empty-command-element` pins the boundary: the argv *array* must be non-empty, an individual argument may be the empty string |
-| `manifest/invalid/*.yaml` | §Manifest | reject: unknown tier, traversal name, below-floor interval, above-ceiling bytes, non-array root, and the uppercase name in `case-folded-alias`. Duplicate YAML keys are rejected at decode, and `duplicate-source` by the manifest validator — neither is expressible in the schema |
+| `manifest/invalid/*.yaml` | §Manifest | reject: unknown tier, traversal name, below-floor interval, above-ceiling bytes, non-array root, and the uppercase name in `case-folded-alias`. Duplicate YAML keys are rejected at decode. `duplicate-source` and `rotate-exceeds-half-retention` are schema-valid by design and rejected only by the manifest validator: cross-entry uniqueness and the `rotate_bytes` ≤ `retention_bytes / 2` ratio each need more of the document than a per-field schema can see |
 | `spool/torn-tail/pr-comments.jsonl` | §Spool and cursors durability | reader stops at last `\n`; writer repairs tail on restart |
 | `spool/multi-segment/*` | §Rotation | monotonic never-overwritten archives plus active file (exact naming is decided by the spool implementation); `retention/pr-comments.json` carries the tombstone left by the removed oldest segment |
 | `synthetic/gap.jsonl` | §Rotation | retained variant: ID is the SHA-256 of the canonical `["gap","retained",…]` array, data carries `cursor_id`/`last_id`/`last_removed_id`/`first_available_id`, and `ts` is the first available event's timestamp |

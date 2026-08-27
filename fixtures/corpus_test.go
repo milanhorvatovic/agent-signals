@@ -523,7 +523,14 @@ func contextFirstEvent(t *testing.T, fixture, source string) map[string]any {
 func contextTombstone(t *testing.T, fixture, source, kind string) (removedID, removedAt string) {
 	t.Helper()
 	path := filepath.Join(contextDir(fixture), source+"."+kind+".json")
-	tomb, _ := decodeWithNumbers(t, path).(map[string]any)
+	// These context documents answer to no schema, and a caller that only
+	// wants one of the two fields would not notice the other going missing —
+	// the retained-gap branch reads last_removed_id and discards removed_at.
+	// Missing members decode to empty strings, so the shape is checked before
+	// anything is taken from it.
+	doc := decodeWithNumbers(t, path)
+	assertTombstone(t, path, doc)
+	tomb, _ := doc.(map[string]any)
 	if src, _ := tomb["source"].(string); src != source {
 		t.Errorf("%s: tombstone is for source %q, record is from %q", path, src, source)
 	}
@@ -953,7 +960,10 @@ func TestManifestFixtures(t *testing.T) {
 	// manifest validator's job, not the schema's. Only duplicate-source.yaml
 	// is exempt: case-folded-alias.yaml carries an uppercase name, which the
 	// schema's lowercase slug pattern rejects on its own.
-	validatorSide := map[string]bool{"duplicate-source.yaml": true}
+	validatorSide := map[string]bool{
+		"duplicate-source.yaml":              true,
+		"rotate-exceeds-half-retention.yaml": true,
+	}
 	// Exactly one fixture is rejected before the schema sees it. Treating any
 	// decode failure as that rejection would let a schema-level fixture rot
 	// into malformed YAML and still pass, and would equally let the
@@ -1778,6 +1788,44 @@ func TestCursorsCarryRequiredMembers(t *testing.T) {
 					t.Errorf("%s: %s is empty", path, field)
 				}
 			}
+		}
+	}
+}
+
+// TestRotateRatioFixtureViolatesTheRatio asserts the property behind the
+// second validator-side exemption. The schema accepts this document by
+// design — every field is in range — and only the manifest validator rejects
+// it, so without this check the fixture could drift into an ordinary valid
+// manifest while the corpus still claimed to cover the rule.
+func TestRotateRatioFixtureViolatesTheRatio(t *testing.T) {
+	inst, err := yamlInstance("manifest/invalid/rotate-exceeds-half-retention.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := inst.([]any)
+	if len(entries) == 0 {
+		t.Fatal("carries no monitor")
+	}
+	for _, e := range entries {
+		entry := e.(map[string]any)
+		rotate, rotateOK := entry["rotate_bytes"].(json.Number)
+		retention, retentionOK := entry["retention_bytes"].(json.Number)
+		if !rotateOK || !retentionOK {
+			t.Fatalf("entry sets rotate_bytes=%v retention_bytes=%v; both are needed to express the ratio",
+				entry["rotate_bytes"], entry["retention_bytes"])
+		}
+		r, err := rotate.Int64()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keep, err := retention.Int64()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Validation rejects a source whose rotate_bytes exceeds
+		// retention_bytes / 2, so the ceiling always has a removable segment.
+		if r <= keep/2 {
+			t.Errorf("rotate_bytes %d is within half of retention_bytes %d; this fixture exists to break that ratio", r, keep)
 		}
 	}
 }
