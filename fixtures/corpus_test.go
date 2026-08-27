@@ -232,18 +232,41 @@ func glob(t *testing.T, pattern string) []string {
 	return m
 }
 
-// spoolSource derives the source a spool file belongs to from its name:
-// <source>.jsonl for the active file, <source>.<seq>.jsonl for an archive. A
-// source may itself contain dots, so only an all-digit final segment is
-// treated as the rotation suffix.
-func spoolSource(path string) string {
-	name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-	if i := strings.LastIndex(name, "."); i >= 0 {
-		if _, err := strconv.Atoi(name[i+1:]); err == nil {
-			return name[:i]
-		}
+// matchesSpool reports whether a JSONL file is part of the named source's
+// spool: <source>.jsonl for the active file, <source>.<digits>.jsonl for an
+// archive. The source is matched rather than inferred, because a valid slug
+// may itself end in an all-digit dotted segment — team.123.jsonl is the
+// active file of source "team.123", not an archive of source "team".
+//
+// Both readings of such a name are accepted, because both are legitimate:
+// team.123.jsonl is equally the active file of "team.123" and archive 123 of
+// "team", and nothing in the name settles it. The contract leaves segment
+// naming to the spool implementation, so the guard's job is to reject a
+// record that belongs to neither reading, not to pick between them.
+func matchesSpool(path, source string) bool {
+	name := filepath.Base(path)
+	if name == source+".jsonl" {
+		return true
 	}
-	return name
+	rest, ok := strings.CutPrefix(name, source+".")
+	if !ok {
+		return false
+	}
+	seq, ok := strings.CutSuffix(rest, ".jsonl")
+	if !ok || seq == "" {
+		return false
+	}
+	return strings.IndexFunc(seq, func(r rune) bool { return r < '0' || r > '9' }) < 0
+}
+
+// sequenceOf reads the trailing decimal the fixtures use to order IDs.
+func sequenceOf(t *testing.T, id string) int64 {
+	t.Helper()
+	n, err := strconv.ParseInt(id[strings.LastIndex(id, "-")+1:], 10, 64)
+	if err != nil {
+		t.Fatalf("%q does not end in the fixtures' decimal sequence", id)
+	}
+	return n
 }
 
 func recordID(inst any) string {
@@ -289,8 +312,8 @@ func TestWatcherFixturesValidate(t *testing.T) {
 				// A spool holds one source. Every record here is schema-valid
 				// with any slug in that field, so without this a fixture could
 				// model cross-source corruption while claiming to be a spool.
-				if source, _ := inst.(map[string]any)["source"].(string); source != spoolSource(path) {
-					t.Errorf("%s line %d: record is from %q, the file is the %q spool", path, i+1, source, spoolSource(path))
+				if source, _ := inst.(map[string]any)["source"].(string); !matchesSpool(path, source) {
+					t.Errorf("%s line %d: record is from %q, which this file is not the spool of", path, i+1, source)
 				}
 			}
 		}
@@ -440,10 +463,12 @@ func contextEvent(t *testing.T, fixture, source, id string) (map[string]any, boo
 	return nil, false
 }
 
-// contextTombstone reads the retention state a gap derives from.
-func contextTombstone(t *testing.T, fixture, source string) (removedID, removedAt string) {
+// contextTombstone reads a retention state a gap derives from: "tombstone"
+// for the removal it reports, "creation-tombstone" for the baseline the
+// cursor recorded when it was created.
+func contextTombstone(t *testing.T, fixture, source, kind string) (removedID, removedAt string) {
 	t.Helper()
-	path := filepath.Join(contextDir(fixture), source+".tombstone.json")
+	path := filepath.Join(contextDir(fixture), source+"."+kind+".json")
 	tomb, _ := decodeWithNumbers(t, path).(map[string]any)
 	if src, _ := tomb["source"].(string); src != source {
 		t.Errorf("%s: tombstone is for source %q, record is from %q", path, src, source)
@@ -623,7 +648,7 @@ func TestGapIDsRecompute(t *testing.T) {
 			}
 			// last_removed_id sits in neither the digest nor the summary, so
 			// it is anchored only by the retention state it reports.
-			if removedID, _ := contextTombstone(t, path, rec.Source); rec.Data.LastRemovedID != removedID {
+			if removedID, _ := contextTombstone(t, path, rec.Source, "tombstone"); rec.Data.LastRemovedID != removedID {
 				t.Errorf("%s: last_removed_id is %q, the tombstone removed through %q", path, rec.Data.LastRemovedID, removedID)
 			}
 		}
@@ -639,7 +664,20 @@ func TestGapIDsRecompute(t *testing.T) {
 			// rather than from the record, because deriving from the record's
 			// own ts would be circular — editing ts and recomputing the ID
 			// would agree with itself and prove nothing.
-			removedID, removedAt := contextTombstone(t, path, rec.Source)
+			removedID, removedAt := contextTombstone(t, path, rec.Source, "tombstone")
+			// A null last_id only takes the gap path when the tombstone has
+			// advanced past the baseline the cursor recorded at creation.
+			// Retention that ran before the cursor existed is not loss for it,
+			// so without the baseline this fixture would equally describe a
+			// cursor that must NOT be gapped, and an implementation gapping
+			// every null cursor would pass against it.
+			baseID, baseAt := contextTombstone(t, path, rec.Source, "creation-tombstone")
+			if baseAt >= removedAt {
+				t.Errorf("%s: creation baseline is at %q and the tombstone at %q; it must have advanced for a null cursor to be gapped", path, baseAt, removedAt)
+			}
+			if sequenceOf(t, baseID) >= sequenceOf(t, removedID) {
+				t.Errorf("%s: creation baseline removed through %q, the tombstone only through %q", path, baseID, removedID)
+			}
 			if rec.Data.LastRemovedID != removedID {
 				t.Errorf("%s: last_removed_id is %q, the tombstone removed through %q", path, rec.Data.LastRemovedID, removedID)
 			}
@@ -1198,7 +1236,7 @@ func TestRetentionDocuments(t *testing.T) {
 		for _, events := range glob(t, filepath.Join(filepath.Dir(filepath.Dir(path)), "*.jsonl")) {
 			// A tombstone is per source, so another source's lower IDs must
 			// not decide whether this one names a retained event.
-			if spoolSource(events) != docSource {
+			if !matchesSpool(events, docSource) {
 				continue
 			}
 			for _, line := range records(t, events) {
