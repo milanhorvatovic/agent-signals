@@ -1,0 +1,337 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/milanhorvatovic/agent-signals/schemas/event.schema.json",
+  "title": "agent-signals event",
+  "description": "One event object per JSONL line on a watcher's stdout. Normative source: event-contract.md §Event and §Watcher requirements. The root schema validates watcher input, which must not use the reserved synthetic ID prefix; service-generated records validate against $defs/syntheticEvent. Enforced by the parse profile before JSON decoding, not by this schema: the raw per-line byte bound (manifest max_event_bytes, including the trailing newline), duplicate object key rejection, unpaired-surrogate rejection, and the depth-64 nesting cap. The ~120-character summary target from §Why `summary` is constrained is a lint warning, not a schema constraint. Anchoring: patterns here are ECMA-262 per the JSON Schema spec, where an unflagged $ is a strict end-of-input assertion — as it is in the service's pinned Go engine — satisfying §Event's full-string rule; \\A/\\z are not expressible in the ECMA dialect, so a consumer whose engine lets $ match before a trailing line terminator (for example Python's re) must substitute its strict end anchor when reusing these patterns.",
+  "$ref": "#/$defs/watcherEvent",
+  "$defs": {
+    "baseEvent": {
+      "description": "Field rules shared by watcher input and service-generated records (event-contract.md §Event field table). Length limits count Unicode scalar values — the same metric as maxLength — and the no-control-character pattern covers exactly C0, DEL, C1, and the Unicode line separators U+2028/U+2029.",
+      "type": "object",
+      "required": ["id", "ts", "source", "kind", "severity", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Stable across retry and unique within its source — event identity is the pair (source, id); never derived from wall-clock time or an in-memory counter. Bounded and line-safe because IDs are interpolated into synthetic record IDs and summaries (event-contract.md §Event).",
+          "$ref": "#/$defs/eventId"
+        },
+        "ts": {
+          "description": "RFC 3339 UTC restricted to the exact profile YYYY-MM-DDTHH:MM:SSZ — whole seconds only; numeric offsets and fractional seconds are rejected, so one instant has exactly one encoding and a retry can never differ in precision. The 20-scalar length pins reject a trailing line terminator on any regex engine, independent of its $ semantics. The pattern asserts per-field ranges (month 01-12, day 01-31, hour 00-23, minute/second 00-59); full calendar validity (month lengths, leap years) is the format assertion's job — format is annotation-only under the default 2020-12 vocabulary, so a conforming validator must compile this schema with format assertion enabled (event-contract.md §Event).",
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 20,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$",
+          "format": "date-time"
+        },
+        "source": {
+          "description": "Canonical lowercase path-safe slug matching a monitors.yaml name; the length bound keeps the value filename-safe (event-contract.md §Event, §Manifest).",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "maxLength": 128
+        },
+        "kind": {
+          "description": "Watcher-defined event type; consumers may filter on it. Projected into the model envelope, so it shares the line-safety and bounding rules of the other projected fields (event-contract.md §Event).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
+        },
+        "severity": {
+          "description": "event-contract.md §Event.",
+          "enum": ["info", "warn", "error"]
+        },
+        "summary": {
+          "description": "One line, self-contained, no reference to prior events; control characters or Unicode line separators would break the line contract, and the length bound keeps the envelope projection bounded (event-contract.md §Event).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
+        },
+        "data": {
+          "description": "Arbitrary structured payload for consumers that fetch the full event (event-contract.md §Event).",
+          "type": "object"
+        }
+      }
+    },
+    "eventId": {
+      "description": "An event ID under §Event's bounds: at most 256 Unicode scalar values, no control characters or Unicode line separators. Synthetic record data references event IDs, so the same bounds apply there (event-contract.md §Event, §Rotation, §Overflow).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
+    },
+    "projectionMarker": {
+      "description": "The exact reserved object {\"$projected\": true} that delivery substitutes for an oversized event's data. Watcher input whose data equals exactly this value is rejected — the same reservation as the synthetic ID prefix — so a full payload can never masquerade as a projection (event-contract.md §Delivery transaction).",
+      "type": "object",
+      "required": ["$projected"],
+      "additionalProperties": false,
+      "properties": {
+        "$projected": { "const": true }
+      }
+    },
+    "watcherEvent": {
+      "description": "Watcher input: the reserved prefix `agent-signals:synthetic:` is service-owned and rejected here, as is a data payload equal to the reserved projection marker (event-contract.md §Event, §Delivery transaction).",
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "id": { "not": { "pattern": "^agent-signals:synthetic:" } },
+            "data": { "not": { "$ref": "#/$defs/projectionMarker" } }
+          }
+        }
+      ]
+    },
+    "syntheticEvent": {
+      "description": "Service-generated records: deterministic gap and overflow events. Overflow records are appended to the shared spool; gap records are cursor-local delivery output and never spooled (event-contract.md §Rotation, §Overflow).",
+      "oneOf": [
+        { "$ref": "#/$defs/gapEvent" },
+        { "$ref": "#/$defs/overflowEvent" }
+      ]
+    },
+    "gapEvent": {
+      "description": "Generated per cursor at delivery time when retention removed events past that cursor — never appended to the shared spool; repeats byte-identically with the same ID until acknowledged. The retained and empty-source variants are exclusive: the `resuming from` summary requires first_available_id in data, the `none retained` summary forbids it and requires the tombstone's last_removed_id (event-contract.md §Rotation).",
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "id": {
+              "description": "agent-signals:synthetic:gap:<digest> — the lowercase hex SHA-256 of the canonical JSON array derivation in event-contract.md §Rotation, fixed-size so the ID bound holds however long its inputs run.",
+              "pattern": "^agent-signals:synthetic:gap:[0-9a-f]{64}$"
+            },
+            "kind": { "const": "gap" },
+            "severity": { "const": "warn" },
+            "data": {
+              "type": "object",
+              "required": ["cursor_id", "last_id"],
+              "additionalProperties": false,
+              "properties": {
+                "cursor_id": {
+                  "description": "The string <consumer>/<instance>/<source> with the original opaque instance — informational rather than parseable. Its components are bounded to 128, 256, and 128 scalars and are control-free, so the joined value is bounded to 514 (event-contract.md §Rotation, §Spool and cursors).",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 514,
+                  "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
+                },
+                "last_id": {
+                  "description": "The cursor's acknowledged position, carried in full because the summary may truncate it; JSON null is the canonical before-everything position. A non-null value is an event ID and carries §Event's bounds (event-contract.md §Rotation, §Cursor lifecycle).",
+                  "type": ["string", "null"],
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$"
+                },
+                "last_removed_id": {
+                  "description": "Present when known; the empty-source variant derives from the retention tombstone and always carries it (event-contract.md §Rotation).",
+                  "$ref": "#/$defs/eventId"
+                },
+                "first_available_id": {
+                  "description": "Present exactly in the retained variant (event-contract.md §Rotation).",
+                  "$ref": "#/$defs/eventId"
+                }
+              }
+            }
+          },
+          "required": ["data"]
+        },
+        {
+          "oneOf": [
+            {
+              "description": "Retained variant: events remain after the removal, and the record resumes from the first of them (event-contract.md §Rotation).",
+              "properties": {
+                "summary": {
+                  "pattern": "^events after .+ were removed by retention; resuming from .+$"
+                },
+                "data": {
+                  "required": ["first_available_id"]
+                }
+              }
+            },
+            {
+              "description": "Empty-source variant: retention removed everything, the record derives from the retention tombstone, and there is no resume ID (event-contract.md §Rotation).",
+              "properties": {
+                "summary": {
+                  "pattern": "^events after .+ were removed by retention; none retained$"
+                },
+                "data": {
+                  "required": ["last_removed_id"],
+                  "not": { "required": ["first_available_id"] }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "overflowEvent": {
+      "description": "Appended to the spool when bounded supervision drops watcher output. Dropped IDs are carried when recoverable — only pending_bytes_exceeded drops can be — otherwise a streaming content fingerprint with its scope discriminator. The summary is coupled to data: each reason selects its exact template, and the pending-cap form agrees with dropped_count in grammatical number (event-contract.md §Overflow).",
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "id": {
+              "description": "agent-signals:synthetic:overflow:<source>:<seq> — a monotonically allocated per-source decimal counter, zero-padded to six digits and widening beyond without truncation (event-contract.md §Overflow). The pattern pins the canonical grammar: the source stays within its 128-scalar slug bound, and the sequence is exactly six digits for values up to 999999 — never 000000, since allocation starts at 1 — then unpadded decimal beyond.",
+              "pattern": "^agent-signals:synthetic:overflow:[a-z0-9][a-z0-9._-]{0,127}:(00000[1-9]|0000[1-9][0-9]|000[1-9][0-9]{2}|00[1-9][0-9]{3}|0[1-9][0-9]{4}|[1-9][0-9]{5,})$"
+            },
+            "kind": { "const": "overflow" },
+            "severity": { "const": "warn" },
+            "summary": {
+              "description": "Exactly one of the three templates in event-contract.md §Overflow; the couplings below tie the template to data.reason and dropped_count.",
+              "pattern": "^(dropped 1 event: pending byte cap exceeded|dropped ([2-9]|[1-9][0-9]+) events: pending byte cap exceeded|dropped an unparseable (oversized|malformed) line)$"
+            },
+            "data": {
+              "type": "object",
+              "required": ["reason", "dropped_ids_known"],
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "description": "Closed vocabulary (event-contract.md §Overflow).",
+                  "enum": ["pending_bytes_exceeded", "line_limit_exceeded", "malformed_line"]
+                },
+                "dropped_ids_known": { "type": "boolean" },
+                "dropped_count": { "type": "integer", "minimum": 1 },
+                "first_dropped_id": { "$ref": "#/$defs/eventId" },
+                "last_dropped_id": { "$ref": "#/$defs/eventId" },
+                "fingerprint": {
+                  "description": "sha256: followed by the lowercase hex SHA-256 of the dropped line's raw bytes, computed streaming over the entire line (event-contract.md §Overflow).",
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "fingerprint_scope": {
+                  "description": "The persisted discriminator recovery needs: only a full fingerprint may arm a replay skip; a prefix fingerprint restores the quarantine (event-contract.md §Overflow).",
+                  "enum": ["full", "prefix"]
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": { "dropped_ids_known": { "const": true } }
+                  },
+                  "then": {
+                    "required": ["dropped_count", "first_dropped_id", "last_dropped_id"],
+                    "not": {
+                      "anyOf": [
+                        { "required": ["fingerprint"] },
+                        { "required": ["fingerprint_scope"] }
+                      ]
+                    }
+                  },
+                  "else": {
+                    "required": ["fingerprint", "fingerprint_scope"],
+                    "not": {
+                      "anyOf": [
+                        { "required": ["dropped_count"] },
+                        { "required": ["first_dropped_id"] },
+                        { "required": ["last_dropped_id"] }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": { "reason": { "enum": ["line_limit_exceeded", "malformed_line"] } },
+                    "required": ["reason"]
+                  },
+                  "then": {
+                    "properties": { "dropped_ids_known": { "const": false } }
+                  },
+                  "else": {
+                    "properties": { "dropped_ids_known": { "const": true } }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": { "fingerprint_scope": { "const": "prefix" } },
+                    "required": ["fingerprint_scope"]
+                  },
+                  "then": {
+                    "properties": { "reason": { "const": "line_limit_exceeded" } }
+                  }
+                }
+              ]
+            }
+          },
+          "required": ["data"]
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["reason"],
+                "properties": { "reason": { "const": "pending_bytes_exceeded" } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "pattern": "^dropped [0-9]+ events?: pending byte cap exceeded$" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["reason"],
+                "properties": { "reason": { "const": "line_limit_exceeded" } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "const": "dropped an unparseable oversized line" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["reason"],
+                "properties": { "reason": { "const": "malformed_line" } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "const": "dropped an unparseable malformed line" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["dropped_count"],
+                "properties": { "dropped_count": { "const": 1 } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "const": "dropped 1 event: pending byte cap exceeded" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "required": ["dropped_count"],
+                "properties": { "dropped_count": { "minimum": 2 } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "summary": { "pattern": "^dropped ([2-9]|[1-9][0-9]+) events: pending byte cap exceeded$" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

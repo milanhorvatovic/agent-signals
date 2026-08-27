@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/milanhorvatovic/agent-signals/schemas/monitors.schema.json",
+  "title": "agent-signals manifest (monitors.yaml)",
+  "description": "The single source of truth adapters are generated from. Normative source: event-contract.md §Manifest. Enforced by the manifest validator, not expressible here: rejection of duplicate source names including case-folded aliases across entries, duplicate-key rejection in the YAML document itself, and rejection of a source whose rotate_bytes exceeds retention_bytes / 2. A well-formed on-skill-invoke trigger naming a nonexistent skill passes validation; adapter generation surfaces the unresolvable slug as a warning where the harness makes its skill set enumerable. Anchoring: patterns here are ECMA-262 per the JSON Schema spec, where an unflagged $ is a strict end-of-input assertion — as it is in the service's pinned Go engine — satisfying §Manifest's full-string rule; \\A/\\z are not expressible in the ECMA dialect, so a consumer whose engine lets $ match before a trailing line terminator (for example Python's re) must substitute its strict end anchor when reusing these patterns.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/monitor" },
+  "$defs": {
+    "monitor": {
+      "type": "object",
+      "required": ["name", "command", "description", "trigger", "tiers"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Canonical lowercase path-safe slug; source paths are formed only after validation, and the grammar (no separators, no leading dot) plus the length bound keeps every value filename-safe (event-contract.md §Manifest).",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "maxLength": 128
+        },
+        "command": {
+          "description": "Non-empty argv array executed without a shell; the array carries at least one element, while an individual argument may be the empty string — a valid argv value the contract does not exclude. Relative paths resolve against the manifest's directory (event-contract.md §Manifest).",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trigger": {
+          "description": "Exactly two forms — session-start, or on-skill-invoke:<slug> with the slug following the name grammar and bound; adapters degrade the richest form a harness lacks (event-contract.md §Manifest).",
+          "type": "string",
+          "pattern": "^(session-start|on-skill-invoke:[a-z0-9][a-z0-9._-]{0,127})$"
+        },
+        "tiers": {
+          "description": "Which adapters to emit for this source; unknown tier names are rejected (event-contract.md §Manifest).",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["push", "hook", "mcp", "prose"] }
+        },
+        "follow": {
+          "description": "Declares that the watcher implements --follow; the service never passes the flag to a source that does not declare it (event-contract.md §Manifest, §Watcher requirements).",
+          "type": "boolean",
+          "default": false
+        },
+        "severity_floor": {
+          "description": "Enforced before spool append; below-floor events are counted in diagnostics but not retained, and still advance the watcher ingest checkpoint (event-contract.md §Manifest).",
+          "enum": ["info", "warn", "error"],
+          "default": "info"
+        },
+        "batch_size": {
+          "description": "Caps returned events before the adapter's encoded-byte cap; lower host limits may reduce it further but never increase it (event-contract.md §Manifest).",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 20
+        },
+        "max_event_bytes": {
+          "description": "Raw UTF-8 bytes per JSONL event including the trailing newline, enforced with a bounded line reader before JSON decoding; the floor guarantees room for a minimal valid event (event-contract.md §Manifest).",
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576,
+          "default": 262144
+        },
+        "interval": {
+          "description": "Seconds between pull-mode invocations for a watcher without --follow, and the backoff ceiling in follow mode; the floor prevents a misconfigured source from hot-looping (event-contract.md §Manifest, §Watcher requirements).",
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 86400,
+          "default": 60
+        },
+        "rotate_bytes": {
+          "description": "Segment rotation threshold in bytes; the validator additionally rejects a value exceeding retention_bytes / 2 so the retention ceiling always has a removable segment (event-contract.md §Manifest, §Rotation).",
+          "type": "integer",
+          "minimum": 65536,
+          "maximum": 1073741824,
+          "default": 8388608
+        },
+        "retention_bytes": {
+          "description": "Hard per-source retention ceiling in bytes; overrides cursor pinning, with the affected cursor taking the gap path (event-contract.md §Manifest, §Rotation).",
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 1099511627776,
+          "default": 134217728
+        },
+        "retention_age": {
+          "description": "Optional age bound in seconds, measured from the durable ingest time of a segment's newest event; unset by default (event-contract.md §Manifest, §Rotation).",
+          "type": "integer",
+          "minimum": 3600,
+          "maximum": 31536000
+        },
+        "cursor_grace": {
+          "description": "Cursor expiry grace period in seconds from event-contract.md §Cursor lifecycle; retention may ignore an expired cursor only after it (event-contract.md §Manifest).",
+          "type": "integer",
+          "minimum": 3600,
+          "maximum": 31536000,
+          "default": 604800
+        },
+        "idle_timeout": {
+          "description": "Supervision idle bound in seconds — time since the last byte on the watcher's stdout or stderr; on expiry the service kills the process group (event-contract.md §Manifest, §Watcher requirements).",
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 86400,
+          "default": 300
+        }
+      }
+    }
+  }
+}

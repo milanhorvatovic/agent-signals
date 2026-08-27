@@ -8,8 +8,8 @@ One executable emits events, one durable spool holds them, thin generated
 adapters deliver them per harness. The normative contract every watcher and
 adapter agrees on is [`docs/event-contract.md`](docs/event-contract.md).
 
-**Status:** early development. The contract and the build scaffold — no
-runtime behaviour yet.
+**Status:** early development. The contract, its schemas, and the build
+scaffold — no runtime behaviour yet.
 
 ## Development
 
