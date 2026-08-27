@@ -390,7 +390,11 @@ func TestInvalidEventFixturesReject(t *testing.T) {
 		"uppercase-source.jsonl":      "Pattern at /source",
 		"wrong-severity.jsonl":        "Enum at /severity",
 	}
-	for _, path := range glob(t, "events/invalid/*.jsonl") {
+	declared := glob(t, "events/invalid/*.jsonl")
+	if len(declared) != len(wantRejection)+1 {
+		t.Errorf("the invalid-event table covers %d fixtures, the corpus holds %d; a declared fixture was removed with its check", len(wantRejection)+1, len(declared))
+	}
+	for _, path := range declared {
 		name := filepath.Base(path)
 		if decodeLevel[name] {
 			continue
@@ -977,7 +981,14 @@ func TestManifestFixtures(t *testing.T) {
 		"traversal-name.yaml":            "Pattern at /0/name",
 		"unknown-tier.yaml":              "Enum at /0/tiers/1",
 	}
-	for _, path := range glob(t, "manifest/invalid/*.yaml") {
+	declaredInvalid := glob(t, "manifest/invalid/*.yaml")
+	// wantRejection covers the schema-level negatives; the decode-level
+	// fixture and the two validator-side ones are named separately.
+	if len(declaredInvalid) != len(wantRejection)+1+len(validatorSide) {
+		t.Errorf("the invalid-manifest tables cover %d fixtures, the corpus holds %d; a declared fixture was removed with its check",
+			len(wantRejection)+1+len(validatorSide), len(declaredInvalid))
+	}
+	for _, path := range declaredInvalid {
 		name := filepath.Base(path)
 		inst, err := yamlInstance(path)
 		if name == decodeLevel {
@@ -1571,7 +1582,11 @@ func TestValidEventFixturesKeepTheirCase(t *testing.T) {
 		// long-summary is pinned by TestLongSummaryCrossesTheLintBoundary.
 		"long-summary.jsonl": func(*testing.T, map[string]any) {},
 	}
-	for _, path := range glob(t, "events/valid/*.jsonl") {
+	declared := glob(t, "events/valid/*.jsonl")
+	if len(declared) != len(cases) {
+		t.Errorf("the valid-event table covers %d fixtures, the corpus holds %d; a declared fixture was removed with its check", len(cases), len(declared))
+	}
+	for _, path := range declared {
 		name := filepath.Base(path)
 		check, known := cases[name]
 		if !known {
@@ -1638,7 +1653,11 @@ func TestValidManifestFixturesKeepTheirCase(t *testing.T) {
 		"example.yaml":     func(*testing.T, []any) {},
 		"all-options.yaml": func(*testing.T, []any) {},
 	}
-	for _, path := range glob(t, "manifest/valid/*.yaml") {
+	declared := glob(t, "manifest/valid/*.yaml")
+	if len(declared) != len(cases) {
+		t.Errorf("the valid-manifest table covers %d fixtures, the corpus holds %d; a declared fixture was removed with its check", len(cases), len(declared))
+	}
+	for _, path := range declared {
 		name := filepath.Base(path)
 		check, known := cases[name]
 		if !known {
@@ -1666,7 +1685,11 @@ func TestOverflowFixturesKeepTheirCase(t *testing.T) {
 		"overflow-prefix-scope.jsonl": {reason: "line_limit_exceeded", scope: "prefix"},
 		"overflow-malformed.jsonl":    {reason: "malformed_line", scope: "full"},
 	}
-	for _, path := range glob(t, "synthetic/overflow-*.jsonl") {
+	declared := glob(t, "synthetic/overflow-*.jsonl")
+	if len(declared) != len(cases) {
+		t.Errorf("the overflow-variant table covers %d fixtures, the corpus holds %d; a declared fixture was removed with its check", len(cases), len(declared))
+	}
+	for _, path := range declared {
 		name := filepath.Base(path)
 		expected, known := cases[name]
 		if !known {
@@ -1706,7 +1729,11 @@ func TestGapFixturesKeepTheirCase(t *testing.T) {
 		"gap.jsonl":              false,
 		"gap-empty-source.jsonl": true,
 	}
-	for _, path := range glob(t, "synthetic/gap*.jsonl") {
+	declared := glob(t, "synthetic/gap*.jsonl")
+	if len(declared) != len(wantNullLastID) {
+		t.Errorf("the gap-position table covers %d fixtures, the corpus holds %d; a declared fixture was removed with its check", len(wantNullLastID), len(declared))
+	}
+	for _, path := range declared {
 		name := filepath.Base(path)
 		wantNull, known := wantNullLastID[name]
 		if !known {

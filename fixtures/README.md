@@ -12,7 +12,9 @@ the derived values a hand edit could desynchronize — both synthetic gap IDs
 from their canonical derivation arrays, and `same.sha256` from the committed
 canonical bytes. Fixtures whose expectation the schema cannot express are
 asserted against that expectation directly rather than skipped, so a skip can
-never stand in for coverage: `duplicate-keys.jsonl` must still repeat a member
+never stand in for coverage, and each of those tables is compared against the
+fixtures actually present so a deletion cannot remove a case together with
+its check: `duplicate-keys.jsonl` must still repeat a member
 name, `duplicate-source.yaml` must still collide and `rotate-exceeds-half-retention.yaml` must still break its ratio, `same-{a,b}.jsonl` must
 still decode to what `same.canonical` describes, the number-lexeme pair must
 stay distinguishable, and every optional manifest field must be set by some
