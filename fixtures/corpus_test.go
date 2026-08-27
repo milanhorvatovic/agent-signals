@@ -714,8 +714,23 @@ func TestGapIDsRecompute(t *testing.T) {
 			}
 			// last_removed_id sits in neither the digest nor the summary, so
 			// it is anchored only by the retention state it reports.
-			if removedID, _ := contextTombstone(t, path, rec.Source, "tombstone"); rec.Data.LastRemovedID != removedID {
+			removedID, _ := contextTombstone(t, path, rec.Source, "tombstone")
+			if rec.Data.LastRemovedID != removedID {
 				t.Errorf("%s: last_removed_id is %q, the tombstone removed through %q", path, rec.Data.LastRemovedID, removedID)
+			}
+			// Retention has to have crossed the cursor for a gap to exist at
+			// all: a cursor whose acknowledged position equals the tombstone
+			// is caught up through everything removed and resumes with no gap.
+			// Equality, or a position beyond it, describes a record the
+			// service must never emit. A null position precedes everything.
+			if rec.Data.LastID != nil && sequenceOf(t, *rec.Data.LastID) >= sequenceOf(t, rec.Data.LastRemovedID) {
+				t.Errorf("%s: acknowledged %q against a tombstone at %q; that cursor is caught up and takes no gap",
+					path, *rec.Data.LastID, rec.Data.LastRemovedID)
+			}
+			// And the resume point is on the far side of the removal.
+			if sequenceOf(t, rec.Data.FirstAvailableID) <= sequenceOf(t, rec.Data.LastRemovedID) {
+				t.Errorf("%s: resumes from %q, which is not past the removal through %q",
+					path, rec.Data.FirstAvailableID, rec.Data.LastRemovedID)
 			}
 		}
 		if rec.Summary != wantSummary {
