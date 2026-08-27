@@ -18,10 +18,10 @@
           "maxLength": 128
         },
         "command": {
-          "description": "Non-empty argv array executed without a shell; empty elements are rejected. Relative paths resolve against the manifest's directory (event-contract.md §Manifest).",
+          "description": "Non-empty argv array executed without a shell; the array carries at least one element, while an individual argument may be the empty string — a valid argv value the contract does not exclude. Relative paths resolve against the manifest's directory (event-contract.md §Manifest).",
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 }
+          "items": { "type": "string" }
         },
         "description": {
           "type": "string",
