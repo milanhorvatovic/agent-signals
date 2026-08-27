@@ -277,6 +277,7 @@ func TestOverflowSummariesRenderFromData(t *testing.T) {
 		for i, line := range records(t, path) {
 			var rec struct {
 				ID      string `json:"id"`
+				Source  string `json:"source"`
 				Summary string `json:"summary"`
 				Data    struct {
 					Reason       string `json:"reason"`
@@ -286,10 +287,20 @@ func TestOverflowSummariesRenderFromData(t *testing.T) {
 			if err := json.Unmarshal(line, &rec); err != nil {
 				t.Fatalf("%s line %d: %v", path, i+1, err)
 			}
-			if !strings.HasPrefix(rec.ID, reservedPfx+"overflow:") {
+			prefix := reservedPfx + "overflow:"
+			if !strings.HasPrefix(rec.ID, prefix) {
 				continue
 			}
 			seen++
+			// The ID embeds the source it was allocated for. The schema pins
+			// the grammar of that component but cannot compare it against the
+			// record's own source, so a valid slug from another source would
+			// pass every other guard while naming a counter no implementation
+			// would have advanced for this one.
+			rest := rec.ID[len(prefix):]
+			if embedded := rest[:strings.LastIndex(rest, ":")]; embedded != rec.Source {
+				t.Errorf("%s line %d: ID names source %q, record is from %q", path, i+1, embedded, rec.Source)
+			}
 			var want string
 			switch rec.Data.Reason {
 			case "pending_bytes_exceeded":
@@ -324,9 +335,10 @@ func TestOverflowSummariesRenderFromData(t *testing.T) {
 func TestGapIDsRecompute(t *testing.T) {
 	for _, path := range glob(t, "synthetic/gap*.jsonl") {
 		var rec struct {
-			ID   string `json:"id"`
-			TS   string `json:"ts"`
-			Data struct {
+			ID     string `json:"id"`
+			TS     string `json:"ts"`
+			Source string `json:"source"`
+			Data   struct {
 				CursorID         string `json:"cursor_id"`
 				LastRemovedID    string `json:"last_removed_id"`
 				FirstAvailableID string `json:"first_available_id"`
@@ -350,6 +362,12 @@ func TestGapIDsRecompute(t *testing.T) {
 			t.Fatalf("%s: cursor_id %q is not <consumer>/<instance>/<source>", path, rec.Data.CursorID)
 		}
 		consumer, source := rec.Data.CursorID[:head], rec.Data.CursorID[tail+1:]
+		// The digest is derived from the cursor's source, so a record whose
+		// own source disagrees would carry an ID belonging to a different
+		// stream — reproducible, and wrong for the event it is attached to.
+		if source != rec.Source {
+			t.Errorf("%s: cursor_id names source %q, record is from %q", path, source, rec.Source)
+		}
 		instance := sha256.Sum256([]byte(rec.Data.CursorID[head+1 : tail]))
 		var derivation []string
 		if rec.Data.FirstAvailableID != "" {
