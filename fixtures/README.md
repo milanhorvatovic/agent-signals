@@ -68,7 +68,7 @@ arrives with the code that needs them.
 | `synthetic/overflow-malformed.jsonl` | §Overflow | `malformed_line` — an in-limit line that fails safe parsing takes the same fingerprint path |
 | `ingest/synthetic-tail/*` | §Spool ingest checkpoint | the spool tail is an `overflow` record, never a `gap`; the checkpoint holds the last dropped watcher-origin ID (`pr-4`), so a synthetic ID never becomes `--since-id` |
 | `ingest/stale/*`, `ingest/missing/*` | §Spool ingest checkpoint | crash between spool sync and checkpoint sync; rebuild by scanning watcher-origin events |
-| `cursors/two-sources/*` | §Delivery transaction | one delivery instance, two independent per-source positions; lower `served_seq` (ci-status, 3) is served first; `pr-comments` holds an unacknowledged batch-end ID in its offer list |
+| `cursors/two-sources/*` | §Delivery transaction | one delivery instance, two independent per-source positions; lower `served_seq` (ci-status, 3) is served first. The pair splits the offer states: `pr-comments` holds an unacknowledged batch-end ID, so its offer list ends at its frontier and its frontier leads `last_id`; `ci-status` has acknowledged everything offered, so its list is pruned empty and its frontier equals `last_id` |
 | `cursors/fresh/*` | §Cursor lifecycle | first non-replay poll: `last_id: null`, `served_seq: 0`, empty offer list, and a creation tombstone baseline that later retention is measured against |
 | `cursors/legacy-no-fairness/*` | §Spool cursor fields | missing `last_seen_at`/`served_seq` reads as zero |
 

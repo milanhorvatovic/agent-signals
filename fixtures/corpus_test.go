@@ -649,6 +649,23 @@ func TestLimitFixtureBounds(t *testing.T) {
 // the event files beside them. Validating events alone left every one of
 // those relationships free to drift.
 
+// assertTombstone checks a retention tombstone wherever one appears — in the
+// retention document, or as a cursor's creation baseline. Both are compared
+// against later removals, so both need the same two fields to compare with.
+func assertTombstone(t *testing.T, label string, v any) {
+	t.Helper()
+	tombstone, ok := v.(map[string]any)
+	if !ok {
+		t.Errorf("%s is %v, want an object carrying last_removed_id and removed_at", label, v)
+		return
+	}
+	for _, field := range []string{"last_removed_id", "removed_at"} {
+		if s, _ := tombstone[field].(string); s == "" {
+			t.Errorf("%s carries no %s", label, field)
+		}
+	}
+}
+
 // stateDoc decodes one JSON state fixture.
 func stateDoc(t *testing.T, path string) map[string]any {
 	t.Helper()
@@ -792,13 +809,8 @@ func TestRetentionDocumentsMatchTheirSpools(t *testing.T) {
 			t.Errorf("%s: no tombstone member; it is null before any removal, never absent", path)
 			continue
 		}
-		if tombstone == nil {
-			continue
-		}
-		for _, field := range []string{"last_removed_id", "removed_at"} {
-			if v, _ := tombstone.(map[string]any)[field].(string); v == "" {
-				t.Errorf("%s: tombstone carries no %s", path, field)
-			}
+		if tombstone != nil {
+			assertTombstone(t, path+" tombstone", tombstone)
 		}
 	}
 }
@@ -822,9 +834,14 @@ func TestFreshCursorIsBeforeEverything(t *testing.T) {
 		if v, present := doc["offered_frontier"]; !present || v != nil {
 			t.Errorf("%s: offered_frontier is %v; no poll has returned anything yet", path, v)
 		}
+		// The baseline is compared against later retention, so it has to be a
+		// usable tombstone rather than merely present: an empty object or a
+		// scalar would satisfy a non-null check and compare against nothing.
 		if doc["creation_tombstone"] == nil {
 			t.Errorf("%s: no creation tombstone baseline; the null-cursor blind spot needs it", path)
+			continue
 		}
+		assertTombstone(t, path+" creation_tombstone", doc["creation_tombstone"])
 	}
 }
 
@@ -841,10 +858,41 @@ func TestCursorFairnessOrdering(t *testing.T) {
 			t.Fatalf("%s: served_seq is not an integer", path)
 		}
 		seqs[source] = n
-		if frontier, present := doc["offered_frontier"]; !present {
+		frontier, present := doc["offered_frontier"]
+		if !present {
 			t.Errorf("%s: no offered_frontier; an advancing ack is validated against it", path)
-		} else if list, _ := doc["offer_list"].([]any); len(list) > 0 && frontier == nil {
-			t.Errorf("%s: carries an offer list with no frontier", path)
+			continue
+		}
+		list, ok := doc["offer_list"].([]any)
+		if !ok {
+			t.Errorf("%s: offer_list is %v, want an array", path, doc["offer_list"])
+			continue
+		}
+		// The two sources model the two halves of the scenario, so each is
+		// pinned to its own half rather than to whatever it happens to hold:
+		// pr-comments has an offered batch end still unacknowledged, and
+		// ci-status has acknowledged everything it was offered.
+		switch source {
+		case "pr-comments":
+			if len(list) == 0 {
+				t.Errorf("%s: empty offer list; this cursor models an offered batch end not yet acknowledged", path)
+				continue
+			}
+			if list[len(list)-1] != frontier {
+				t.Errorf("%s: offer list ends at %v, frontier is %v; each poll appends its batch-end ID", path, list[len(list)-1], frontier)
+			}
+			if doc["last_id"] == frontier {
+				t.Errorf("%s: frontier %v equals last_id; nothing would be outstanding", path, frontier)
+			}
+		case "ci-status":
+			if len(list) != 0 {
+				t.Errorf("%s: offer list is %v; entries at or before the acknowledged position are pruned on acknowledgement", path, list)
+			}
+			if frontier != doc["last_id"] {
+				t.Errorf("%s: frontier %v does not equal last_id %v; this cursor is caught up", path, frontier, doc["last_id"])
+			}
+		default:
+			t.Errorf("%s: unexpected source %q in the two-source fixture", path, source)
 		}
 	}
 	if len(seqs) != 2 {
