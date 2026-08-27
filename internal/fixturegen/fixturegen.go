@@ -42,19 +42,22 @@ func PendingOverflowStream(w io.Writer, source string) (events int, total int64,
 		return 0, 0, err
 	}
 	pad := strings.Repeat("x", padRunes)
-	for total <= PendingBytes {
+	crossed := false
+	for {
+		// A writer may return n > 0 alongside an error, so the bytes count
+		// before the error is read: total reports what reached the writer,
+		// events only those that got there whole.
 		n, err := writeEvent(w, source, events, pad)
+		total += int64(n)
 		if err != nil {
 			return events, total, err
 		}
 		events++
-		total += int64(n)
+		if crossed {
+			return events, total, nil
+		}
+		crossed = total > PendingBytes
 	}
-	n, err := writeEvent(w, source, events, pad)
-	if err != nil {
-		return events, total, err
-	}
-	return events + 1, total + int64(n), nil
 }
 
 // DuplicateReplaySet writes n distinct events followed by the same n events
@@ -63,6 +66,9 @@ func PendingOverflowStream(w io.Writer, source string) (events int, total int64,
 func DuplicateReplaySet(w io.Writer, source string, n int) error {
 	if err := contract.ValidateSlug("source", source); err != nil {
 		return err
+	}
+	if n < 0 {
+		return fmt.Errorf("replay set size is %d, which cannot be generated", n)
 	}
 	for round := 0; round < 2; round++ {
 		for i := 0; i < n; i++ {

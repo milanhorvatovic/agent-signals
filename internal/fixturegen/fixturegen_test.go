@@ -4,11 +4,34 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/milanhorvatovic/agent-signals/internal/contract"
 )
+
+var errWriterFull = errors.New("writer is full")
+
+// partialWriter takes every write whole until failOn, where it takes half
+// the bytes and fails — the n > 0 alongside an error that io.Writer permits
+// and a full disk actually produces.
+type partialWriter struct {
+	failOn   int
+	calls    int
+	accepted int64
+}
+
+func (p *partialWriter) Write(b []byte) (int, error) {
+	p.calls++
+	if p.calls < p.failOn {
+		p.accepted += int64(len(b))
+		return len(b), nil
+	}
+	n := len(b) / 2
+	p.accepted += int64(n)
+	return n, errWriterFull
+}
 
 func TestPendingOverflowStreamIsDeterministicAndCrossesCap(t *testing.T) {
 	var first, second bytes.Buffer
@@ -70,6 +93,30 @@ func TestDuplicateReplaySet(t *testing.T) {
 		if !bytes.Equal(lines[i], lines[n+i]) {
 			t.Fatalf("replay line %d is not byte-identical to its original", i)
 		}
+	}
+}
+
+func TestPendingOverflowStreamCountsPartiallyWrittenBytes(t *testing.T) {
+	w := &partialWriter{failOn: 2}
+	events, total, err := PendingOverflowStream(w, "overflow-stream")
+	if !errors.Is(err, errWriterFull) {
+		t.Fatalf("want the writer's error, got %v", err)
+	}
+	if total != w.accepted {
+		t.Errorf("reported %d bytes, writer accepted %d — the half-written event is unaccounted for", total, w.accepted)
+	}
+	if events != 1 {
+		t.Errorf("counted %d whole events, want 1 — the failed write produced no complete event", events)
+	}
+}
+
+func TestDuplicateReplaySetRejectsANegativeCount(t *testing.T) {
+	var buf bytes.Buffer
+	if err := DuplicateReplaySet(&buf, "replay", -1); err == nil {
+		t.Error("DuplicateReplaySet(-1): want an error, got none — an empty corpus is not a generated replay set")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("count was rejected but %d bytes were written", buf.Len())
 	}
 }
 
