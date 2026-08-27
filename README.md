@@ -9,7 +9,8 @@ adapters deliver them per harness. The normative contract every watcher and
 adapter agrees on is [`docs/event-contract.md`](docs/event-contract.md).
 
 **Status:** early development. The contract, its schemas, the golden fixture
-corpus, and the build scaffold — no runtime behaviour yet.
+corpus, the parse profile that reads them, and the build scaffold — no runtime
+behaviour yet.
 
 ## Development
 
