@@ -218,10 +218,17 @@ func TestRejectsUnpairedSurrogates(t *testing.T) {
 			}
 		})
 	}
-	// The paired form is the control: a valid pair must still be accepted, or
-	// the check above would pass by rejecting every escape.
-	if _, _, err := ParseEventLine(eventLine(`"summary":"😀"`), 0, WatcherInput); err != nil {
+	// The paired form is the control, and it has to be the escaped pair: a
+	// literal emoji is raw UTF-8 that never reaches the escape scan, so an
+	// implementation rejecting every \uD800 to \uDFFF escape would pass against
+	// one. Decoding it back to the scalar it denotes is the other half —
+	// accepted-and-mangled would otherwise read the same as accepted.
+	event, _, err := ParseEventLine(eventLine(`"summary":"\ud83d\ude00"`), 0, WatcherInput)
+	if err != nil {
 		t.Fatalf("valid surrogate pair rejected: %v", err)
+	}
+	if event.Summary != "\U0001F600" {
+		t.Errorf("the escaped pair decoded to %q, want the scalar it denotes", event.Summary)
 	}
 	// An escaped backslash does not open an escape, so this is the literal
 	// text \ud800 and carries no surrogate at all.

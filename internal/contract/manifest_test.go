@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/milanhorvatovic/agent-signals/schemas"
 )
@@ -120,28 +121,61 @@ func TestManifestCarriesEveryOptionalField(t *testing.T) {
 		t.Fatalf("got %d monitors, want 1", len(monitors))
 	}
 	monitor := monitors[0]
+	// The fixture is read a second time without the loader, so each field is
+	// compared against the value under its own manifest key. Comparing only
+	// against the defaults would leave two same-typed fields free to swap —
+	// exchange retention_age and cursor_grace in the loader and both still
+	// differ from their defaults, and every check stays green.
+	declared := declaredEntry(t, "manifest", "valid", "all-options.yaml")
+	seconds := func(v any) any { return time.Duration(v.(int)) * time.Second }
 	for _, field := range []struct {
 		name string
 		got  any
 		def  any
+		// want converts the fixture's raw YAML value into the representation
+		// the loaded field holds.
+		want func(any) any
 	}{
-		{"follow", monitor.Follow, false},
-		{"severity_floor", monitor.SeverityFloor, DefaultSeverityFloor},
-		{"batch_size", monitor.BatchSize, DefaultBatchSize},
-		{"max_event_bytes", monitor.MaxEventBytes, DefaultMaxEventBytes},
-		{"interval", monitor.Interval, DefaultInterval},
-		{"rotate_bytes", monitor.RotateBytes, DefaultRotateBytes},
-		{"retention_bytes", monitor.RetentionBytes, DefaultRetentionBytes},
-		{"retention_age", monitor.RetentionAge, time.Duration(0)},
-		{"cursor_grace", monitor.CursorGrace, DefaultCursorGrace},
-		{"idle_timeout", monitor.IdleTimeout, DefaultIdleTimeout},
+		{"follow", monitor.Follow, false, func(v any) any { return v }},
+		{"severity_floor", monitor.SeverityFloor, DefaultSeverityFloor, func(v any) any { return Severity(v.(string)) }},
+		{"batch_size", monitor.BatchSize, DefaultBatchSize, func(v any) any { return v.(int) }},
+		{"max_event_bytes", monitor.MaxEventBytes, DefaultMaxEventBytes, func(v any) any { return v.(int) }},
+		{"interval", monitor.Interval, DefaultInterval, seconds},
+		{"rotate_bytes", monitor.RotateBytes, DefaultRotateBytes, func(v any) any { return int64(v.(int)) }},
+		{"retention_bytes", monitor.RetentionBytes, DefaultRetentionBytes, func(v any) any { return int64(v.(int)) }},
+		{"retention_age", monitor.RetentionAge, time.Duration(0), seconds},
+		{"cursor_grace", monitor.CursorGrace, DefaultCursorGrace, seconds},
+		{"idle_timeout", monitor.IdleTimeout, DefaultIdleTimeout, seconds},
 	} {
-		// The fixture sets each of these to a non-default value, so a field
-		// still holding its default is one the loader never read.
+		raw, present := declared[field.name]
+		if !present {
+			t.Errorf("all-options.yaml does not set %s; this fixture exists to set every optional field", field.name)
+			continue
+		}
+		if want := field.want(raw); field.got != want {
+			t.Errorf("%s loaded as %v, the fixture declares %v", field.name, field.got, want)
+		}
+		// And the fixture's value must stay off the default, or the comparison
+		// above would hold for a field the loader never read.
 		if field.got == field.def {
-			t.Errorf("%s is %v, its default; the loader is not reading the fixture's value", field.name, field.got)
+			t.Errorf("%s is %v, its default; the fixture must exercise a non-default value", field.name, field.got)
 		}
 	}
+}
+
+// declaredEntry reads a single-entry manifest fixture with a plain YAML
+// unmarshal — deliberately not through ParseManifest, since a loader checked
+// against its own output would agree with itself whatever it did.
+func declaredEntry(t *testing.T, parts ...string) map[string]any {
+	t.Helper()
+	var doc []map[string]any
+	if err := yaml.Unmarshal(readFixture(t, parts...), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc) != 1 {
+		t.Fatalf("%v carries %d entries, want exactly one", parts, len(doc))
+	}
+	return doc[0]
 }
 
 // TestManifestRejectsMultipleDocuments pins the whole input as the unit of
