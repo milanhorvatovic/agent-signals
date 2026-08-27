@@ -36,6 +36,9 @@ const (
 	syntheticID = eventID + "#/$defs/syntheticEvent"
 	reservedPfx = "agent-signals:synthetic:"
 	gapIDPrefix = reservedPfx + "gap:"
+
+	// The one fixture whose final record is deliberately unterminated.
+	tornTailFixture = "spool/torn-tail/pr-comments.jsonl"
 )
 
 // compiled carries the three schema entry points the corpus is checked against.
@@ -148,6 +151,13 @@ func records(t *testing.T, path string) [][]byte {
 	cut := bytes.LastIndexByte(raw, '\n')
 	if cut < 0 {
 		t.Fatalf("%s carries no newline terminator; a JSONL fixture must end its records", path)
+	}
+	// One fixture models a torn write; everywhere else an unterminated tail is
+	// a fixture that lost its terminator. Discarding it silently for every
+	// path would let a half-record be appended to any file and checked by
+	// nothing, which is the very failure the torn-tail fixture exists to name.
+	if cut != len(raw)-1 && filepath.ToSlash(path) != tornTailFixture {
+		t.Fatalf("%s ends with an unterminated fragment; only %s models a torn write", path, tornTailFixture)
 	}
 	return bytes.Split(raw[:cut], []byte("\n"))
 }
@@ -1179,11 +1189,18 @@ func TestStaleCheckpointLagsItsSpool(t *testing.T) {
 // TestMissingCheckpointIsAbsent keeps the missing fixture distinguishable
 // from the stale one: its whole point is that no checkpoint document exists.
 func TestMissingCheckpointIsAbsent(t *testing.T) {
-	if _, err := os.Stat("ingest/missing/ingest"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("ingest/missing carries a checkpoint directory (%v); the fixture models one that was never written", err)
-	}
-	if len(records(t, "ingest/missing/events/pr-comments.jsonl")) == 0 {
-		t.Error("ingest/missing carries no events to rebuild the checkpoint from")
+	// The invariant is the absence of this source's checkpoint, not of the
+	// shared directory: an empty ingest/ — or one holding another source's
+	// document — models a missing pr-comments checkpoint just as well.
+	for _, events := range glob(t, "ingest/missing/events/*.jsonl") {
+		source := strings.TrimSuffix(filepath.Base(events), ".jsonl")
+		checkpoint := filepath.Join("ingest/missing/ingest", source+".json")
+		if _, err := os.Stat(checkpoint); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s exists (%v); the fixture models a checkpoint that was never written", checkpoint, err)
+		}
+		if len(records(t, events)) == 0 {
+			t.Errorf("%s carries no events to rebuild the checkpoint from", events)
+		}
 	}
 }
 
