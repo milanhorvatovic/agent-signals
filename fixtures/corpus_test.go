@@ -781,12 +781,12 @@ func TestGapIDsRecompute(t *testing.T) {
 			}
 			derivation = []string{"gap", "empty", consumer, hex.EncodeToString(instance[:]), source, removedID, removedAt}
 		}
-		// HTML escaping is off: encoding/json turns <, > and & into <,
-		// > and & by default, while the contract's canonical form
-		// carries them as raw UTF-8. Event IDs are not restricted to ASCII or
-		// to any safe subset, so a gap whose inputs contain one of those
-		// characters would otherwise be checked against a digest no
-		// conforming implementation would produce.
+		// HTML escaping is off. By default encoding/json emits < as the
+		// six bytes \u003c, > as \u003e and & as \u0026, while the
+		// contract's canonical form carries all three as raw UTF-8. Event IDs
+		// are restricted to neither ASCII nor any safe subset, so a gap whose
+		// inputs contain one of those characters would otherwise be checked
+		// against a digest no conforming implementation would produce.
 		var encoded bytes.Buffer
 		enc := json.NewEncoder(&encoded)
 		enc.SetEscapeHTML(false)
@@ -1626,8 +1626,10 @@ func TestValidManifestFixturesKeepTheirCase(t *testing.T) {
 				t.Errorf("carries %d distinct source names; the fixture is a multi-source manifest", len(names))
 			}
 		},
-		// example mirrors the contract's manifest block; all-options is pinned
-		// by TestEveryOptionalManifestFieldIsExercised.
+		// example mirrors the contract's manifest block, which is checked
+		// against the document itself by TestExampleMirrorsTheContract; a
+		// no-op here would guard nothing. all-options is pinned by
+		// TestEveryOptionalManifestFieldIsExercised.
 		"example.yaml":     func(*testing.T, []any) {},
 		"all-options.yaml": func(*testing.T, []any) {},
 	}
@@ -1827,5 +1829,55 @@ func TestRotateRatioFixtureViolatesTheRatio(t *testing.T) {
 		if r <= keep/2 {
 			t.Errorf("rotate_bytes %d is within half of retention_bytes %d; this fixture exists to break that ratio", r, keep)
 		}
+	}
+}
+
+// TestExampleMirrorsTheContract compares the example manifest against the
+// YAML block in the contract itself. The fixture's whole purpose is to be
+// that block, and "mirrors the contract" is a claim about a document that can
+// change independently — it had already drifted, missing the `follow` field —
+// so the comparison reads the block rather than restating its contents.
+func TestExampleMirrorsTheContract(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "docs", "event-contract.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := bytes.Index(doc, []byte("\n## Manifest\n"))
+	if manifest < 0 {
+		t.Fatal("the contract has no Manifest section")
+	}
+	rest := doc[manifest:]
+	open := bytes.Index(rest, []byte("```yaml\n"))
+	if open < 0 {
+		t.Fatal("the Manifest section carries no YAML block")
+	}
+	rest = rest[open+len("```yaml\n"):]
+	end := bytes.Index(rest, []byte("```"))
+	if end < 0 {
+		t.Fatal("the Manifest YAML block is unterminated")
+	}
+	var documented any
+	if err := yaml.Unmarshal(rest[:end], &documented); err != nil {
+		t.Fatalf("the contract's manifest block does not parse: %v", err)
+	}
+	// Both sides go through the same JSON round trip the validator uses, so
+	// the comparison is over values rather than over YAML node types.
+	normalize := func(v any) any {
+		buf, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := jsonschema.UnmarshalJSON(bytes.NewReader(buf))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	fixture, err := yamlInstance("manifest/valid/example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := normalize(documented); !reflect.DeepEqual(fixture, want) {
+		t.Errorf("example.yaml has drifted from the contract's manifest block:\n  fixture   %#v\n  contract  %#v", fixture, want)
 	}
 }

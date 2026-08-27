@@ -3,6 +3,7 @@
   description: New PR review comments
   trigger: on-skill-invoke:harvest
   tiers: [push, hook, mcp, prose]
+  follow: false
   severity_floor: info
   batch_size: 20
   max_event_bytes: 262144
