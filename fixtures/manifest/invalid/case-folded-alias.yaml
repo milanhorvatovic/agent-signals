@@ -5,6 +5,6 @@
   tiers: [mcp]
 - name: PR-COMMENTS
   command: ["./watchers/pr-comments-2.sh"]
-  description: case-folded alias on a case-insensitive filesystem
+  description: an uppercase alias never reaches cross-entry alias detection
   trigger: session-start
   tiers: [mcp]

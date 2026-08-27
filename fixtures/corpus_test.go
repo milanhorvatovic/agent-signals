@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -77,6 +78,10 @@ func decodeJSON(t *testing.T, raw []byte) any {
 
 // records returns every newline-terminated line of a JSONL fixture, dropping
 // an unterminated final fragment — the torn tail a reader must stop before.
+// A fixture with no terminator at all is a framing error rather than an empty
+// file: returning nothing there would drop a one-record fixture out of every
+// glob-driven check while leaving them green. Blank lines are returned as
+// empty records for the same reason, and fail at decode.
 func records(t *testing.T, path string) [][]byte {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -85,9 +90,69 @@ func records(t *testing.T, path string) [][]byte {
 	}
 	cut := bytes.LastIndexByte(raw, '\n')
 	if cut < 0 {
-		return nil
+		t.Fatalf("%s carries no newline terminator; a JSONL fixture must end its records", path)
 	}
-	return bytes.Split(bytes.TrimSuffix(raw[:cut], []byte("\n")), []byte("\n"))
+	return bytes.Split(raw[:cut], []byte("\n"))
+}
+
+// containsDuplicateKey reports whether any JSON object in raw repeats a member
+// name. encoding/json keeps the last occurrence silently, which is exactly why
+// the parse profile rejects the input before decoding.
+func containsDuplicateKey(raw []byte) bool {
+	type frame struct {
+		object  bool
+		wantKey bool
+		keys    map[string]bool
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var stack []*frame
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		delim, isDelim := tok.(json.Delim)
+		if isDelim && (delim == '}' || delim == ']') {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].wantKey {
+			key, ok := tok.(string)
+			if !ok {
+				return false
+			}
+			if stack[n-1].keys[key] {
+				return true
+			}
+			stack[n-1].keys[key] = true
+			stack[n-1].wantKey = false
+			continue
+		}
+		// This token opens a value, so the enclosing object expects a key next.
+		if n := len(stack); n > 0 && stack[n-1].object {
+			stack[n-1].wantKey = true
+		}
+		if isDelim {
+			stack = append(stack, &frame{object: delim == '{', wantKey: delim == '{', keys: map[string]bool{}})
+		}
+	}
+}
+
+// decodeWithNumbers decodes a fixture preserving number lexemes, so 1.50 and
+// 1.5 stay distinguishable — the corpus pins that distinction.
+func decodeWithNumbers(t *testing.T, path string) any {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	return v
 }
 
 func glob(t *testing.T, pattern string) []string {
@@ -140,7 +205,8 @@ func TestWatcherFixturesValidate(t *testing.T) {
 func TestInvalidEventFixturesReject(t *testing.T) {
 	s := compile(t)
 	// Duplicate object keys are rejected by the parse profile at decode; a
-	// JSON decoder collapses them before the schema ever sees the instance.
+	// JSON decoder collapses them before the schema ever sees the instance, so
+	// that fixture is asserted against the decode-level property instead.
 	decodeLevel := map[string]bool{"duplicate-keys.jsonl": true}
 	for _, path := range glob(t, "events/invalid/*.jsonl") {
 		name := filepath.Base(path)
@@ -150,6 +216,21 @@ func TestInvalidEventFixturesReject(t *testing.T) {
 		if err := s.watcher.Validate(decodeJSON(t, records(t, path)[0])); err == nil {
 			t.Errorf("%s: accepted, want reject", name)
 		}
+	}
+}
+
+// TestDuplicateKeyFixtureRepeatsAKey asserts the property its fixture exists
+// for. Without this the exemption above would leave the file unchecked, and
+// rewriting it into ordinary valid JSON would keep the corpus green while the
+// stated decode-level expectation quietly described nothing.
+func TestDuplicateKeyFixtureRepeatsAKey(t *testing.T) {
+	line := records(t, "events/invalid/duplicate-keys.jsonl")[0]
+	if !containsDuplicateKey(line) {
+		t.Error("duplicate-keys.jsonl carries no repeated member name")
+	}
+	// The permissive path is the reason the parse profile owns this rejection.
+	if _, err := jsonschema.UnmarshalJSON(bytes.NewReader(line)); err != nil {
+		t.Errorf("a permissive decoder should accept it; the parse profile is what must reject it: %v", err)
 	}
 }
 
@@ -246,6 +327,37 @@ func TestCanonicalDigestMatches(t *testing.T) {
 	}
 }
 
+// TestCanonicalInputsAgree ties both inputs to the committed canonical bytes.
+// Proving the byte-exact serialization — recursive UTF-16 key ordering, the
+// RFC 8785 escape table, preserved number lexemes — needs the canonicalizer
+// itself and belongs to the parse profile; what the corpus can prove without
+// it is that neither input drifted to different content than same.canonical
+// describes, which is the drift a hand edit actually causes.
+func TestCanonicalInputsAgree(t *testing.T) {
+	want := decodeWithNumbers(t, "events/canonical/same.canonical")
+	for _, name := range []string{"same-a.jsonl", "same-b.jsonl"} {
+		got := decodeWithNumbers(t, filepath.Join("events/canonical", name))
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s decodes to different content than same.canonical:\n  got  %#v\n  want %#v", name, got, want)
+		}
+	}
+}
+
+// TestNumberLexemesDiffer pins the pair the canonicalization rules exist for:
+// 1 and 1.0 are the same value and different lexemes, so they must not
+// collapse into one another.
+func TestNumberLexemesDiffer(t *testing.T) {
+	i := decodeWithNumbers(t, "events/canonical/lexeme-int.jsonl")
+	f := decodeWithNumbers(t, "events/canonical/lexeme-float.jsonl")
+	get := func(v any) string {
+		n, _ := v.(map[string]any)["data"].(map[string]any)["n"].(json.Number)
+		return n.String()
+	}
+	if get(i) == get(f) {
+		t.Errorf("both lexeme fixtures carry n as %q; the pair must stay distinguishable", get(i))
+	}
+}
+
 func TestTornTailCarriesAFragment(t *testing.T) {
 	raw, err := os.ReadFile("spool/torn-tail/pr-comments.jsonl")
 	if err != nil {
@@ -291,8 +403,10 @@ func TestManifestFixtures(t *testing.T) {
 		}
 	}
 	// Cross-entry name uniqueness needs the whole document at once and is the
-	// manifest validator's job, not the schema's.
-	validatorSide := map[string]bool{"duplicate-source.yaml": true, "case-folded-alias.yaml": true}
+	// manifest validator's job, not the schema's. Only duplicate-source.yaml
+	// is exempt: case-folded-alias.yaml carries an uppercase name, which the
+	// schema's lowercase slug pattern rejects on its own.
+	validatorSide := map[string]bool{"duplicate-source.yaml": true}
 	for _, path := range glob(t, "manifest/invalid/*.yaml") {
 		name := filepath.Base(path)
 		inst, err := yamlInstance(path)
@@ -303,6 +417,64 @@ func TestManifestFixtures(t *testing.T) {
 			t.Errorf("%s: accepted, want reject", name)
 		}
 	}
+}
+
+// TestEveryOptionalManifestFieldIsExercised keeps the valid corpus honest
+// about its own coverage: a schema change to an optional property that no
+// fixture sets would otherwise land with nothing to catch it.
+func TestEveryOptionalManifestFieldIsExercised(t *testing.T) {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemas.Monitors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := doc.(map[string]any)["$defs"].(map[string]any)["monitor"].(map[string]any)
+	required := map[string]bool{}
+	for _, r := range monitor["required"].([]any) {
+		required[r.(string)] = true
+	}
+	set := map[string]bool{}
+	for _, path := range glob(t, "manifest/valid/*.yaml") {
+		inst, err := yamlInstance(path)
+		if err != nil {
+			t.Fatalf("%s: %v", filepath.Base(path), err)
+		}
+		entries, _ := inst.([]any)
+		for _, e := range entries {
+			for field := range e.(map[string]any) {
+				set[field] = true
+			}
+		}
+	}
+	for field := range monitor["properties"].(map[string]any) {
+		if !required[field] && !set[field] {
+			t.Errorf("no valid fixture sets the optional field %q", field)
+		}
+	}
+}
+
+// TestDuplicateSourceFixtureCollides asserts the property the one validator-
+// side exemption above rests on. The schema accepts this document by design,
+// so without this check the fixture would pass the suite while claiming to
+// carry a collision it no longer had.
+func TestDuplicateSourceFixtureCollides(t *testing.T) {
+	inst, err := yamlInstance("manifest/invalid/duplicate-source.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, ok := inst.([]any)
+	if !ok || len(entries) < 2 {
+		t.Fatalf("expected a manifest array of at least two entries, got %T", inst)
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		name, _ := e.(map[string]any)["name"].(string)
+		folded := strings.ToLower(name)
+		if seen[folded] {
+			return
+		}
+		seen[folded] = true
+	}
+	t.Error("duplicate-source.yaml carries no colliding name; the validator-side exemption covers nothing")
 }
 
 // TestLimitFixtureBounds pins the raw byte bound the parse profile enforces

@@ -10,7 +10,20 @@ byte-exact — do not reformat them.
 against the embedded schemas with format assertion enabled, and recomputes
 the derived values a hand edit could desynchronize — both synthetic gap IDs
 from their canonical derivation arrays, and `same.sha256` from the committed
-canonical bytes.
+canonical bytes. Fixtures whose expectation the schema cannot express are
+asserted against that expectation directly rather than skipped, so a skip can
+never stand in for coverage: `duplicate-keys.jsonl` must still repeat a member
+name, `duplicate-source.yaml` must still collide, `same-{a,b}.jsonl` must
+still decode to what `same.canonical` describes, the number-lexeme pair must
+stay distinguishable, and every optional manifest field must be set by some
+valid fixture.
+
+A case-folded alias between two schema-valid names is unreachable: `name` is
+lowercase ASCII by grammar, and two distinct lowercase strings cannot collide
+under case folding. `case-folded-alias.yaml` therefore carries an uppercase
+name and is rejected by the schema, one step before cross-entry detection
+would apply — the validator's own alias rule stays defence in depth for input
+that has not been through the schema yet.
 
 Oversized corpora are generated, not committed: `internal/fixturegen`
 deterministically produces the >16 MiB supervision-window stream
@@ -32,8 +45,8 @@ deterministically produces the >16 MiB supervision-window stream
 | `events/canonical/lexeme-{int,float}.jsonl` | §Spool number-lexeme preservation | `1` and `1.0` digest differently |
 | `events/canonical/conflict-{a,b}.jsonl` | §Spool duplicate vs conflict | same ID, different digest — hard conflict |
 | `events/limits/*` | §Manifest `max_event_bytes`, §Watcher requirement 1 | `exact-limit` (512 B incl. newline, per `limits.json`) ingests; `over-limit` rejects before JSON decoding |
-| `manifest/valid/*.yaml` | §Manifest | validate; absent optionals take defaults. `empty-command-element` pins the boundary: the argv *array* must be non-empty, an individual argument may be the empty string |
-| `manifest/invalid/*.yaml` | §Manifest | reject: unknown tier, traversal name, below-floor interval, above-ceiling bytes, non-array root. Duplicate YAML keys are rejected at decode, and duplicate + case-folded source names by the manifest validator — neither is expressible in the schema |
+| `manifest/valid/*.yaml` | §Manifest | validate; the minimal fixtures leave optionals absent to take defaults, and `all-options` sets every one of them to a non-default value. `empty-command-element` pins the boundary: the argv *array* must be non-empty, an individual argument may be the empty string |
+| `manifest/invalid/*.yaml` | §Manifest | reject: unknown tier, traversal name, below-floor interval, above-ceiling bytes, non-array root, and the uppercase name in `case-folded-alias`. Duplicate YAML keys are rejected at decode, and `duplicate-source` by the manifest validator — neither is expressible in the schema |
 | `spool/torn-tail/pr-comments.jsonl` | §Spool and cursors durability | reader stops at last `\n`; writer repairs tail on restart |
 | `spool/multi-segment/*` | §Rotation | monotonic never-overwritten archives plus active file (exact naming is decided by the spool implementation); `retention/pr-comments.json` carries the tombstone left by the removed oldest segment |
 | `synthetic/gap.jsonl` | §Rotation | retained variant: ID is the SHA-256 of the canonical `["gap","retained",…]` array, data carries `cursor_id`/`last_id`/`last_removed_id`/`first_available_id` |
