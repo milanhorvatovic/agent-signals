@@ -27,7 +27,10 @@ is not the tail, the missing one has no document at all, an overflow sequence
 is never allocated twice within a spool, the fresh cursor is null/0/empty with
 a creation baseline, the legacy cursor omits the fairness fields and nothing
 else, and every cursor directory is the SHA-256 of the instance retained
-inside it.
+inside it. Cursor documents answer to no schema, so every one of them is also
+held to the member list in §Spool and cursors — four of those members are
+legitimately null before a first acknowledgement, which is present-and-null
+rather than absent.
 
 A retention high-water mark below the highest retained overflow sequence is
 **not** an inconsistency: it is the crash between appending the record and

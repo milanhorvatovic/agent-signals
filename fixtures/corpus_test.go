@@ -1599,3 +1599,58 @@ func TestGapFixturesKeepTheirCase(t *testing.T) {
 		}
 	}
 }
+
+// TestCursorsCarryRequiredMembers holds every cursor document to the member
+// list in §Spool and cursors. These fixtures answer to no schema, and each
+// scenario test reads only the handful of fields its own scenario turns on,
+// so a required member could be deleted from all of them and nothing would
+// notice — the corpus would then ship cursor documents no implementation
+// should accept.
+func TestCursorsCarryRequiredMembers(t *testing.T) {
+	// Four of these are legitimately null: a cursor before its first
+	// acknowledgement has no position, no acknowledgement time, and no
+	// offered frontier, and a source with no prior retention has no creation
+	// baseline. Present-and-null is the contract's answer, not absent.
+	nullable := map[string]bool{"last_id": true, "acked_at": true, "offered_frontier": true, "creation_tombstone": true}
+	// The legacy fixture exists to omit exactly these; its own test pins that.
+	legacyOmits := map[string]bool{"last_seen_at": true, "served_seq": true}
+	for _, path := range glob(t, "cursors/*/*/*/*.json") {
+		legacy := strings.HasPrefix(path, "cursors/legacy-no-fairness/")
+		doc := stateDoc(t, path)
+		for _, field := range []string{
+			"consumer", "instance", "source", "last_id", "acked_at",
+			"last_seen_at", "served_seq", "offered_frontier", "offer_list", "creation_tombstone",
+		} {
+			if legacy && legacyOmits[field] {
+				continue
+			}
+			value, present := doc[field]
+			if !present {
+				t.Errorf("%s: no %s; every current cursor records it", path, field)
+				continue
+			}
+			if value == nil {
+				if !nullable[field] {
+					t.Errorf("%s: %s is null", path, field)
+				}
+				continue
+			}
+			switch field {
+			case "served_seq":
+				if _, ok := value.(json.Number); !ok {
+					t.Errorf("%s: served_seq is %v, want a number", path, value)
+				}
+			case "offer_list":
+				if _, ok := value.([]any); !ok {
+					t.Errorf("%s: offer_list is %v, want an array", path, value)
+				}
+			case "creation_tombstone":
+				assertTombstone(t, path+" creation_tombstone", value)
+			default:
+				if s, _ := value.(string); s == "" {
+					t.Errorf("%s: %s is empty", path, field)
+				}
+			}
+		}
+	}
+}
