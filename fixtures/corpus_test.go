@@ -14,9 +14,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -265,6 +267,48 @@ func TestSyntheticFixturesValidate(t *testing.T) {
 	}
 }
 
+// renderInterpolatedID applies §Rotation's truncation rule for an ID placed
+// in a synthetic summary: past 120 scalars it becomes its first 96, an
+// ellipsis, and 16 hex characters of its digest, so a summary is bounded
+// however long its inputs run. No fixture reaches the bound today; the rule
+// is implemented rather than assumed so one could be added without the
+// comparison quietly becoming wrong.
+func renderInterpolatedID(id string) string {
+	scalars := []rune(id)
+	if len(scalars) <= 120 {
+		return id
+	}
+	digest := sha256.Sum256([]byte(id))
+	return string(scalars[:96]) + "…" + hex.EncodeToString(digest[:])[:16]
+}
+
+// TestMultiSegmentOrdering pins the rotation layout itself: archives in name
+// order carry strictly earlier events than the archives after them, and the
+// active file carries the newest. Schema-validating each record says nothing
+// about the arrangement, which is the whole point of the fixture. Ordering is
+// read from the fixture's own pr-<n> ID sequence.
+func TestMultiSegmentOrdering(t *testing.T) {
+	archives := glob(t, "spool/multi-segment/*.[0-9]*.jsonl")
+	sort.Strings(archives)
+	ordered := append(archives, "spool/multi-segment/pr-comments.jsonl")
+	var prev int64
+	prevName := ""
+	for _, path := range ordered {
+		for i, line := range records(t, path) {
+			id := recordID(decodeJSON(t, line))
+			n, err := strconv.ParseInt(id[strings.LastIndex(id, "-")+1:], 10, 64)
+			if err != nil {
+				t.Fatalf("%s line %d: ID %q does not end in the fixture's decimal sequence", path, i+1, id)
+			}
+			if n <= prev {
+				t.Errorf("%s carries %q after %q in %s; segments run oldest to newest, active file last",
+					path, id, "pr-"+strconv.FormatInt(prev, 10), prevName)
+			}
+			prev, prevName = n, path
+		}
+	}
+}
+
 // TestOverflowSummariesRenderFromData rebuilds each overflow summary from the
 // record's own reason and count. The schema pins the template and the
 // singular/plural split, but not the number itself — it cannot compare two
@@ -335,13 +379,15 @@ func TestOverflowSummariesRenderFromData(t *testing.T) {
 func TestGapIDsRecompute(t *testing.T) {
 	for _, path := range glob(t, "synthetic/gap*.jsonl") {
 		var rec struct {
-			ID     string `json:"id"`
-			TS     string `json:"ts"`
-			Source string `json:"source"`
-			Data   struct {
-				CursorID         string `json:"cursor_id"`
-				LastRemovedID    string `json:"last_removed_id"`
-				FirstAvailableID string `json:"first_available_id"`
+			ID      string `json:"id"`
+			TS      string `json:"ts"`
+			Source  string `json:"source"`
+			Summary string `json:"summary"`
+			Data    struct {
+				CursorID         string  `json:"cursor_id"`
+				LastID           *string `json:"last_id"`
+				LastRemovedID    string  `json:"last_removed_id"`
+				FirstAvailableID string  `json:"first_available_id"`
 			} `json:"data"`
 		}
 		raw, err := os.ReadFile(path)
@@ -369,6 +415,21 @@ func TestGapIDsRecompute(t *testing.T) {
 			t.Errorf("%s: cursor_id names source %q, record is from %q", path, source, rec.Source)
 		}
 		instance := sha256.Sum256([]byte(rec.Data.CursorID[head+1 : tail]))
+		// The digest deliberately excludes last_id and the summary, so both
+		// are unpinned by the ID check above: the summary is re-rendered from
+		// data here, since §Rotation states it exactly.
+		last := "-"
+		if rec.Data.LastID != nil {
+			last = renderInterpolatedID(*rec.Data.LastID)
+		}
+		wantSummary := fmt.Sprintf("events after %s were removed by retention; none retained", last)
+		if rec.Data.FirstAvailableID != "" {
+			wantSummary = fmt.Sprintf("events after %s were removed by retention; resuming from %s",
+				last, renderInterpolatedID(rec.Data.FirstAvailableID))
+		}
+		if rec.Summary != wantSummary {
+			t.Errorf("%s:\n  summary %q\n  renders %q from its data", path, rec.Summary, wantSummary)
+		}
 		var derivation []string
 		if rec.Data.FirstAvailableID != "" {
 			derivation = []string{"gap", "retained", consumer, hex.EncodeToString(instance[:]), source, rec.Data.FirstAvailableID}
@@ -440,8 +501,19 @@ func TestNumberLexemesDiffer(t *testing.T) {
 		n, _ := v["data"].(map[string]any)["n"].(json.Number)
 		return n.String()
 	}
+	// Two halves, and the pair needs both: the lexemes must differ, and they
+	// must still denote one value. Checking only the first would accept 1
+	// against 2.0, which demonstrates nothing about lexeme preservation.
 	if get(i) == get(f) {
 		t.Errorf("both lexeme fixtures carry n as %q; the pair must stay distinguishable", get(i))
+	}
+	ri, iOK := new(big.Rat).SetString(get(i))
+	rf, fOK := new(big.Rat).SetString(get(f))
+	if !iOK || !fOK {
+		t.Fatalf("n is not a number in one of the pair: %q, %q", get(i), get(f))
+	}
+	if ri.Cmp(rf) != 0 {
+		t.Errorf("the lexeme pair carries different values (%q and %q); it must be one value in two lexemes", get(i), get(f))
 	}
 	for field := range i {
 		if field == "data" {
@@ -648,7 +720,10 @@ func TestLimitFixtureBounds(t *testing.T) {
 	}
 	for name, ok := range map[string]func(int64) bool{
 		"exact-limit.jsonl": func(n int64) bool { return n == limits.MaxEventBytes },
-		"over-limit.jsonl":  func(n int64) bool { return n > limits.MaxEventBytes },
+		// Exactly one byte past the cap, not merely past it: the pair exists
+		// to sit on the boundary, and a padding edit that pushed it further
+		// out would still be "over" while no longer testing the edge.
+		"over-limit.jsonl": func(n int64) bool { return n == limits.MaxEventBytes+1 },
 	} {
 		info, err := os.Stat(filepath.Join("events/limits", name))
 		if err != nil {
@@ -744,23 +819,26 @@ func TestCheckpointsHoldWatcherOriginIDs(t *testing.T) {
 // dropped ID, so replay resumes past the loss instead of stalling on it.
 func TestSyntheticTailCheckpointClearsTheDrop(t *testing.T) {
 	doc := stateDoc(t, "ingest/synthetic-tail/ingest/pr-comments.json")
-	var lastDropped string
-	for _, line := range records(t, "ingest/synthetic-tail/events/pr-comments.jsonl") {
-		var rec struct {
-			ID   string `json:"id"`
-			Data struct {
-				LastDroppedID string `json:"last_dropped_id"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(line, &rec); err != nil {
-			t.Fatal(err)
-		}
-		if strings.HasPrefix(rec.ID, reservedPfx+"overflow:") {
-			lastDropped = rec.Data.LastDroppedID
-		}
+	lines := records(t, "ingest/synthetic-tail/events/pr-comments.jsonl")
+	// The overflow has to be the tail, not merely present: the fixture is
+	// named for a spool whose last record is synthetic, and a watcher event
+	// appended after it would make the checkpoint comparison meaningless
+	// while every assertion here still passed.
+	var rec struct {
+		ID   string `json:"id"`
+		Data struct {
+			LastDroppedID string `json:"last_dropped_id"`
+		} `json:"data"`
 	}
+	if err := json.Unmarshal(lines[len(lines)-1], &rec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(rec.ID, reservedPfx+"overflow:") {
+		t.Fatalf("the spool tail is %q; this fixture models a synthetic tail", rec.ID)
+	}
+	lastDropped := rec.Data.LastDroppedID
 	if lastDropped == "" {
-		t.Fatal("the synthetic tail carries no recoverable overflow record")
+		t.Fatal("the tail overflow record is not the recoverable form; it carries no last_dropped_id")
 	}
 	if doc["last_id"] != lastDropped {
 		t.Errorf("checkpoint is at %v; the overflow record dropped through %q", doc["last_id"], lastDropped)
