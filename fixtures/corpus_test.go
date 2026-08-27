@@ -266,6 +266,7 @@ func TestWatcherFixturesValidate(t *testing.T) {
 		{"events/limits/*.jsonl", false},
 		{"spool/*/*.jsonl", true},
 		{"ingest/*/events/*.jsonl", true},
+		{"synthetic/context/*.jsonl", true},
 	}
 	for _, p := range patterns {
 		for _, path := range glob(t, p.glob) {
@@ -409,6 +410,20 @@ func TestSyntheticFixturesValidate(t *testing.T) {
 	if seen != len(glob(t, "synthetic/*.jsonl"))+1 {
 		t.Errorf("checked %d synthetic records, want one per fixture plus the spooled overflow tail", seen)
 	}
+}
+
+// contextEvent finds the watcher record a synthetic fixture derives from.
+// synthetic/context holds the events a gap refers to but does not contain,
+// so the derived fields can be checked against their real inputs.
+func contextEvent(t *testing.T, source, id string) (map[string]any, bool) {
+	t.Helper()
+	for _, line := range records(t, filepath.Join("synthetic/context", source+".jsonl")) {
+		rec, _ := decodeJSON(t, line).(map[string]any)
+		if rec["id"] == id {
+			return rec, true
+		}
+	}
+	return nil, false
 }
 
 // renderInterpolatedID applies §Rotation's truncation rule for an ID placed
@@ -570,6 +585,15 @@ func TestGapIDsRecompute(t *testing.T) {
 		if rec.Data.FirstAvailableID != "" {
 			wantSummary = fmt.Sprintf("events after %s were removed by retention; resuming from %s",
 				last, renderInterpolatedID(rec.Data.FirstAvailableID))
+			// ts is the first available event's timestamp, so the retained
+			// variant is only checkable against that event. Without the
+			// companion record any schema-valid ts would pass.
+			first, found := contextEvent(t, rec.Source, rec.Data.FirstAvailableID)
+			if !found {
+				t.Errorf("%s: no companion record for first_available_id %q; ts cannot be verified", path, rec.Data.FirstAvailableID)
+			} else if ts, _ := first["ts"].(string); ts != rec.TS {
+				t.Errorf("%s: ts is %q, the first available event %q is at %q", path, rec.TS, rec.Data.FirstAvailableID, ts)
+			}
 		}
 		if rec.Summary != wantSummary {
 			t.Errorf("%s:\n  summary %q\n  renders %q from its data", path, rec.Summary, wantSummary)
@@ -1068,14 +1092,25 @@ func TestRetentionDocumentsMatchTheirSpools(t *testing.T) {
 			t.Errorf("%s: overflow_high_water is not an integer", path)
 			continue
 		}
-		var highest int64
-		for _, seq := range overflowSequences(t, filepath.Dir(filepath.Dir(path))) {
-			if seq > highest {
-				highest = seq
-			}
+		// A mark below the highest retained sequence is not corruption: it is
+		// the crash between appending an overflow record and committing the
+		// mark, which is why recovery takes max(mark, highest retained) rather
+		// than trusting the mark. Requiring mark >= highest would forbid a
+		// state the contract guarantees is survivable. What the document owes
+		// on its own is a usable counter value; proving the recovery formula
+		// needs the implementation that performs it.
+		if mark < 0 {
+			t.Errorf("%s: overflow high-water mark is %d", path, mark)
 		}
-		if mark < highest {
-			t.Errorf("%s: high-water mark %d is below the retained overflow sequence %d", path, mark, highest)
+		// What the records themselves do owe: a sequence is allocated once per
+		// source and never reused, so two retained overflow records sharing
+		// one would mean the same number named two different drops.
+		seen := map[int64]bool{}
+		for _, seq := range overflowSequences(t, filepath.Dir(filepath.Dir(path))) {
+			if seen[seq] {
+				t.Errorf("%s: overflow sequence %d is allocated twice in this spool", path, seq)
+			}
+			seen[seq] = true
 		}
 		tombstone, present := doc["tombstone"]
 		if !present {
@@ -1218,6 +1253,14 @@ func TestLegacyCursorOmitsFairnessFields(t *testing.T) {
 		for _, field := range []string{"last_seen_at", "served_seq"} {
 			if _, present := doc[field]; present {
 				t.Errorf("%s: carries %s; the fixture models a document written before those fields existed", path, field)
+			}
+		}
+		// Only the two fairness fields may be missing. Omitting anything else
+		// as well would confound the case: a failure could then mean any
+		// absent field rather than legacy fairness decoding specifically.
+		for _, field := range []string{"consumer", "instance", "source", "last_id", "acked_at", "offered_frontier", "offer_list", "creation_tombstone"} {
+			if _, present := doc[field]; !present {
+				t.Errorf("%s: also missing %s; this fixture isolates the absent fairness fields, nothing else", path, field)
 			}
 		}
 	}

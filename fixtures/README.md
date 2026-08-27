@@ -23,11 +23,17 @@ meaning is entirely in how they relate to the event files beside them, and
 the guard asserts those relations directly: a checkpoint never holds a
 synthetic ID, the synthetic-tail checkpoint sits exactly at its overflow
 record's `last_dropped_id`, the stale checkpoint names a spooled event that
-is not the tail, the missing one has no document at all, a retention
-high-water mark is never below a retained overflow sequence, the fresh cursor
-is null/0/empty with a creation baseline, the legacy cursor still omits the
-fairness fields, and every cursor directory is the SHA-256 of the instance
-retained inside it.
+is not the tail, the missing one has no document at all, an overflow sequence
+is never allocated twice within a spool, the fresh cursor is null/0/empty with
+a creation baseline, the legacy cursor omits the fairness fields and nothing
+else, and every cursor directory is the SHA-256 of the instance retained
+inside it.
+
+A retention high-water mark below the highest retained overflow sequence is
+**not** an inconsistency: it is the crash between appending the record and
+committing the mark, which is why recovery takes the maximum of the two
+(§Overflow). The corpus does not forbid that state, and proving the recovery
+itself belongs to the code that performs it.
 
 A case-folded alias between two schema-valid names is unreachable: `name` is
 lowercase ASCII by grammar, and two distinct lowercase strings cannot collide
@@ -61,7 +67,8 @@ arrives with the code that needs them.
 | `manifest/invalid/*.yaml` | §Manifest | reject: unknown tier, traversal name, below-floor interval, above-ceiling bytes, non-array root, and the uppercase name in `case-folded-alias`. Duplicate YAML keys are rejected at decode, and `duplicate-source` by the manifest validator — neither is expressible in the schema |
 | `spool/torn-tail/pr-comments.jsonl` | §Spool and cursors durability | reader stops at last `\n`; writer repairs tail on restart |
 | `spool/multi-segment/*` | §Rotation | monotonic never-overwritten archives plus active file (exact naming is decided by the spool implementation); `retention/pr-comments.json` carries the tombstone left by the removed oldest segment |
-| `synthetic/gap.jsonl` | §Rotation | retained variant: ID is the SHA-256 of the canonical `["gap","retained",…]` array, data carries `cursor_id`/`last_id`/`last_removed_id`/`first_available_id` |
+| `synthetic/gap.jsonl` | §Rotation | retained variant: ID is the SHA-256 of the canonical `["gap","retained",…]` array, data carries `cursor_id`/`last_id`/`last_removed_id`/`first_available_id`, and `ts` is the first available event's timestamp |
+| `synthetic/context/*.jsonl` | §Rotation | the events a gap refers to but never contains — a gap is generated at delivery time from a spool it does not carry, so its derived `ts` is only checkable against the real record |
 | `synthetic/gap-empty-source.jsonl` | §Rotation | empty-source variant: distinct `["gap","empty",…]` digest input, tombstone-derived `ts`, no `first_available_id`, and `last_id: null` rendered as the literal `-` in the summary |
 | `synthetic/overflow-known-ids.jsonl`, `overflow-single.jsonl` | §Overflow | `pending_bytes_exceeded` — the only recoverable reason; summary agrees with `dropped_count` in grammatical number |
 | `synthetic/overflow-fingerprint.jsonl`, `overflow-prefix-scope.jsonl` | §Overflow | `line_limit_exceeded` with `dropped_ids_known: false`; `full` may arm a replay skip, `prefix` restores the quarantine |
@@ -70,7 +77,7 @@ arrives with the code that needs them.
 | `ingest/stale/*`, `ingest/missing/*` | §Spool ingest checkpoint | crash between spool sync and checkpoint sync; rebuild by scanning watcher-origin events |
 | `cursors/two-sources/*` | §Delivery transaction | one delivery instance, two independent per-source positions; lower `served_seq` (ci-status, 3) is served first. The pair splits the offer states: `pr-comments` holds an unacknowledged batch-end ID, so its offer list ends at its frontier and its frontier leads `last_id`; `ci-status` has acknowledged everything offered, so its list is pruned empty and its frontier equals `last_id` |
 | `cursors/fresh/*` | §Cursor lifecycle | first non-replay poll: `last_id: null`, `served_seq: 0`, empty offer list, and a creation tombstone baseline that later retention is measured against |
-| `cursors/legacy-no-fairness/*` | §Spool cursor fields | missing `last_seen_at`/`served_seq` reads as zero |
+| `cursors/legacy-no-fairness/*` | §Spool cursor fields | missing `last_seen_at`/`served_seq` reads as zero; every other current field is present, so a failure here can only mean legacy fairness decoding |
 
 Cursor directories use the real instance hash: `sha256("build-agent-main")`
 hex, with the original identity retained inside each document (§Spool and
