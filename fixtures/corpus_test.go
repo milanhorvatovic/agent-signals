@@ -348,8 +348,15 @@ func TestWatcherFixturesValidate(t *testing.T) {
 					t.Errorf("%s line %d: %q carries the reserved prefix; this fixture holds watcher input", path, i+1, recordID(inst))
 				case synth:
 					// A spool legitimately mixes watcher records with
-					// service-generated ones, so those are held to the
-					// synthetic schema rather than merely waved through.
+					// service-generated ones, but only overflow records: a gap
+					// describes one cursor's position and is never appended to
+					// the shared spool. The synthetic schema is a choice
+					// between the two forms, so validating against it alone
+					// would accept a spooled gap — the very thing the
+					// synthetic-tail fixture exists to rule out.
+					if !strings.HasPrefix(recordID(inst), reservedPfx+"overflow:") {
+						t.Errorf("%s line %d: %q is spooled, but only overflow records are", path, i+1, recordID(inst))
+					}
 					if synthErr := s.synthetic.Validate(inst); synthErr != nil {
 						t.Errorf("%s line %d: spooled synthetic record is invalid: %v", path, i+1, synthErr)
 					}
