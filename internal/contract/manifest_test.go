@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -81,30 +82,63 @@ func TestManifestDefaults(t *testing.T) {
 		t.Fatalf("got %d monitors, want 1", len(monitors))
 	}
 	monitor := monitors[0]
-	want := Monitor{
-		Name:           monitor.Name,
-		Command:        monitor.Command,
-		Description:    monitor.Description,
-		Trigger:        monitor.Trigger,
-		Tiers:          monitor.Tiers,
-		Follow:         false,
-		SeverityFloor:  DefaultSeverityFloor,
-		BatchSize:      DefaultBatchSize,
-		MaxEventBytes:  DefaultMaxEventBytes,
-		Interval:       DefaultInterval,
-		RotateBytes:    DefaultRotateBytes,
-		RetentionBytes: DefaultRetentionBytes,
-		// No default age bound is declared, so the source is under the byte
+	// The required fields are compared against the fixture read without the
+	// loader. Building the expectation from the loaded entry would make it
+	// agree with itself: every one of these could be dropped or swapped with
+	// another string field and nothing would notice.
+	declared := declaredEntry(t, "manifest", "valid", "minimal.yaml")
+	for _, field := range []struct {
+		key string
+		got string
+	}{
+		{"name", monitor.Name},
+		{"description", monitor.Description},
+		{"trigger", monitor.Trigger},
+	} {
+		if want, _ := declared[field.key].(string); field.got != want {
+			t.Errorf("%s loaded as %q, the fixture declares %q", field.key, field.got, want)
+		}
+	}
+	// Both slices by content, not by length: an argv of the right size holding
+	// the wrong words is the failure a count cannot see, and tiers were
+	// compared against nothing at all.
+	if want := declaredStrings(t, declared["command"]); !slices.Equal(monitor.Command, want) {
+		t.Errorf("command loaded as %q, the fixture declares %q", monitor.Command, want)
+	}
+	var wantTiers []Tier
+	for _, tier := range declaredStrings(t, declared["tiers"]) {
+		wantTiers = append(wantTiers, Tier(tier))
+	}
+	if !slices.Equal(monitor.Tiers, wantTiers) {
+		t.Errorf("tiers loaded as %v, the fixture declares %v", monitor.Tiers, wantTiers)
+	}
+	// This fixture sets no optional field, so every one of them must hold the
+	// contract default.
+	for _, field := range []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"follow", monitor.Follow, false},
+		{"severity_floor", monitor.SeverityFloor, DefaultSeverityFloor},
+		{"batch_size", monitor.BatchSize, DefaultBatchSize},
+		{"max_event_bytes", monitor.MaxEventBytes, DefaultMaxEventBytes},
+		{"interval", monitor.Interval, DefaultInterval},
+		{"rotate_bytes", monitor.RotateBytes, DefaultRotateBytes},
+		{"retention_bytes", monitor.RetentionBytes, DefaultRetentionBytes},
+		// No default age bound is declared, so a source is under the byte
 		// ceiling alone until one is configured.
-		RetentionAge: 0,
-		CursorGrace:  DefaultCursorGrace,
-		IdleTimeout:  DefaultIdleTimeout,
-	}
-	if !monitorsEqual(monitor, want) {
-		t.Fatalf("defaults not applied:\n got %+v\nwant %+v", monitor, want)
-	}
-	if len(monitor.Command) != 3 {
-		t.Fatalf("argv not preserved: %v", monitor.Command)
+		{"retention_age", monitor.RetentionAge, time.Duration(0)},
+		{"cursor_grace", monitor.CursorGrace, DefaultCursorGrace},
+		{"idle_timeout", monitor.IdleTimeout, DefaultIdleTimeout},
+	} {
+		if _, set := declared[field.name]; set {
+			t.Errorf("minimal.yaml sets %s; this fixture exists to leave every optional at its default", field.name)
+			continue
+		}
+		if field.got != field.want {
+			t.Errorf("%s defaulted to %v, want %v", field.name, field.got, field.want)
+		}
 	}
 }
 
@@ -260,14 +294,20 @@ func TestRepoManifestValidates(t *testing.T) {
 	}
 }
 
-// monitorsEqual compares two entries field by field. Monitor holds slices, so
-// it is not comparable with ==, and reflect.DeepEqual over the whole struct
-// would report a difference without naming the field.
-func monitorsEqual(a, b Monitor) bool {
-	return a.Name == b.Name && a.Description == b.Description && a.Trigger == b.Trigger &&
-		a.Follow == b.Follow && a.SeverityFloor == b.SeverityFloor && a.BatchSize == b.BatchSize &&
-		a.MaxEventBytes == b.MaxEventBytes && a.Interval == b.Interval &&
-		a.RotateBytes == b.RotateBytes && a.RetentionBytes == b.RetentionBytes &&
-		a.RetentionAge == b.RetentionAge && a.CursorGrace == b.CursorGrace &&
-		a.IdleTimeout == b.IdleTimeout
+// declaredStrings reads a YAML sequence of strings from a fixture entry.
+func declaredStrings(t *testing.T, raw any) []string {
+	t.Helper()
+	elems, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("fixture value is %v, want a sequence", raw)
+	}
+	out := make([]string, 0, len(elems))
+	for _, elem := range elems {
+		s, ok := elem.(string)
+		if !ok {
+			t.Fatalf("fixture sequence carries %v, want a string", elem)
+		}
+		out = append(out, s)
+	}
+	return out
 }
