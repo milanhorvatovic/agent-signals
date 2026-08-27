@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,11 +77,60 @@ func compile(t *testing.T) compiled {
 
 func decodeJSON(t *testing.T, raw []byte) any {
 	t.Helper()
+	// The decoder keeps the last of a repeated member silently, so without
+	// this a fixture the corpus treats as well-formed could carry a duplicate
+	// key the parse profile is required to reject — a golden record the
+	// strict decoder could not accept. The one fixture that demonstrates the
+	// permissive path deliberately does not come through here.
+	if containsDuplicateKey(raw) {
+		t.Fatalf("repeated member name in %s", raw)
+	}
 	v, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	return v
+}
+
+// rejectionLeaves reports the keyword that actually rejected an instance, as
+// "<Keyword> at /<instance path>", for every leaf of the validation error.
+// The intermediate $ref and allOf nodes are structure, not cause.
+func rejectionLeaves(err error) []string {
+	var ve *jsonschema.ValidationError
+	if !errors.As(err, &ve) {
+		return nil
+	}
+	var out []string
+	var walk func(e *jsonschema.ValidationError)
+	walk = func(e *jsonschema.ValidationError) {
+		if len(e.Causes) == 0 {
+			kind := fmt.Sprintf("%T", e.ErrorKind)
+			out = append(out, kind[strings.LastIndex(kind, ".")+1:]+" at /"+strings.Join(e.InstanceLocation, "/"))
+			return
+		}
+		for _, cause := range e.Causes {
+			walk(cause)
+		}
+	}
+	walk(ve)
+	return out
+}
+
+// assertRejectedBy requires the named keyword and instance path to be among
+// the reasons an instance was rejected. "Rejected at all" is too weak for a
+// negative fixture: a severity fixture that lost a required field would still
+// be rejected, and would still pass, while no longer testing severity.
+func assertRejectedBy(t *testing.T, name string, err error, want string) {
+	t.Helper()
+	if err == nil {
+		t.Errorf("%s: accepted, want reject by %s", name, want)
+		return
+	}
+	got := rejectionLeaves(err)
+	if slices.Contains(got, want) {
+		return
+	}
+	t.Errorf("%s: rejected by %v, want %s — the fixture no longer isolates its documented clause", name, got, want)
 }
 
 // records returns every newline-terminated line of a JSONL fixture, dropping
@@ -249,14 +299,31 @@ func TestInvalidEventFixturesReject(t *testing.T) {
 	// JSON decoder collapses them before the schema ever sees the instance, so
 	// that fixture is asserted against the decode-level property instead.
 	decodeLevel := map[string]bool{"duplicate-keys.jsonl": true}
+	// Each fixture names the clause it is for, so each is held to that clause
+	// rather than to being rejected somehow.
+	wantRejection := map[string]string{
+		"array-top-level.jsonl":       "Type at /",
+		"bad-calendar-ts.jsonl":       "Format at /ts",
+		"empty-source.jsonl":          "Pattern at /source",
+		"empty-summary.jsonl":         "MinLength at /summary",
+		"missing-id.jsonl":            "Required at /",
+		"multiline-summary.jsonl":     "Pattern at /summary",
+		"non-utc-ts.jsonl":            "Pattern at /ts",
+		"reserved-synthetic-id.jsonl": "Not at /id",
+		"uppercase-source.jsonl":      "Pattern at /source",
+		"wrong-severity.jsonl":        "Enum at /severity",
+	}
 	for _, path := range glob(t, "events/invalid/*.jsonl") {
 		name := filepath.Base(path)
 		if decodeLevel[name] {
 			continue
 		}
-		if err := s.watcher.Validate(decodeJSON(t, records(t, path)[0])); err == nil {
-			t.Errorf("%s: accepted, want reject", name)
+		want, known := wantRejection[name]
+		if !known {
+			t.Errorf("%s: no documented rejection clause; add one so the fixture cannot pass for an unintended reason", name)
+			continue
 		}
+		assertRejectedBy(t, name, s.watcher.Validate(decodeJSON(t, records(t, path)[0])), want)
 	}
 }
 
@@ -680,6 +747,14 @@ func TestManifestFixtures(t *testing.T) {
 	// into malformed YAML and still pass, and would equally let the
 	// duplicate-key fixture start decoding cleanly without anyone noticing.
 	decodeLevel := "duplicate-yaml-keys.yaml"
+	wantRejection := map[string]string{
+		"below-interval-floor.yaml":      "Minimum at /0/interval",
+		"case-folded-alias.yaml":         "Pattern at /1/name",
+		"not-an-array.yaml":              "Type at /",
+		"oversized-max-event-bytes.yaml": "Maximum at /0/max_event_bytes",
+		"traversal-name.yaml":            "Pattern at /0/name",
+		"unknown-tier.yaml":              "Enum at /0/tiers/1",
+	}
 	for _, path := range glob(t, "manifest/invalid/*.yaml") {
 		name := filepath.Base(path)
 		inst, err := yamlInstance(path)
@@ -703,9 +778,12 @@ func TestManifestFixtures(t *testing.T) {
 			}
 			continue
 		}
-		if err == nil {
-			t.Errorf("%s: accepted, want reject", name)
+		want, known := wantRejection[name]
+		if !known {
+			t.Errorf("%s: no documented rejection clause; add one so the fixture cannot pass for an unintended reason", name)
+			continue
 		}
+		assertRejectedBy(t, name, err, want)
 	}
 }
 
