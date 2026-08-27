@@ -203,6 +203,9 @@ func decodeWithNumbers(t *testing.T, path string) any {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
+	if containsDuplicateKey(raw) {
+		t.Fatalf("repeated member name in %s", path)
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
@@ -324,7 +327,12 @@ func TestInvalidEventFixturesReject(t *testing.T) {
 			t.Errorf("%s: no documented rejection clause; add one so the fixture cannot pass for an unintended reason", name)
 			continue
 		}
-		assertRejectedBy(t, name, s.watcher.Validate(decodeJSON(t, records(t, path)[0])), want)
+		// Every line, not just the first: a valid record appended to a negative
+		// fixture would be accepted by JSONL ingestion, so checking one line
+		// stops describing the file.
+		for i, line := range records(t, path) {
+			assertRejectedBy(t, fmt.Sprintf("%s line %d", name, i+1), s.watcher.Validate(decodeJSON(t, line)), want)
+		}
 	}
 }
 
@@ -603,8 +611,23 @@ func TestGapIDsRecompute(t *testing.T) {
 			derivation = []string{"gap", "retained", consumer, hex.EncodeToString(instance[:]), source, rec.Data.FirstAvailableID}
 		} else {
 			// Empty-source variant: the record derives from the retention
-			// tombstone, and ts is the removal time.
-			derivation = []string{"gap", "empty", consumer, hex.EncodeToString(instance[:]), source, rec.Data.LastRemovedID, rec.TS}
+			// tombstone. Both inputs are read from the companion tombstone
+			// rather than from the record, because deriving from the record's
+			// own ts would be circular — editing ts and recomputing the ID
+			// would agree with itself and prove nothing.
+			tomb := decodeWithNumbers(t, filepath.Join("synthetic/context", rec.Source+".tombstone.json")).(map[string]any)
+			removedID, _ := tomb["last_removed_id"].(string)
+			removedAt, _ := tomb["removed_at"].(string)
+			if src, _ := tomb["source"].(string); src != rec.Source {
+				t.Errorf("%s: tombstone is for source %q, record is from %q", path, src, rec.Source)
+			}
+			if rec.Data.LastRemovedID != removedID {
+				t.Errorf("%s: last_removed_id is %q, the tombstone removed through %q", path, rec.Data.LastRemovedID, removedID)
+			}
+			if rec.TS != removedAt {
+				t.Errorf("%s: ts is %q, the tombstone's removal time is %q", path, rec.TS, removedAt)
+			}
+			derivation = []string{"gap", "empty", consumer, hex.EncodeToString(instance[:]), source, removedID, removedAt}
 		}
 		// Every element is a control-free ASCII string, so canonical
 		// serialization is Go's escape-free array encoding.
@@ -630,6 +653,14 @@ func TestCanonicalDigestMatches(t *testing.T) {
 	}
 	if bytes.HasSuffix(canonical, []byte("\n")) {
 		t.Fatal("same.canonical carries a trailing newline; the digest must cover the record alone")
+	}
+	// These bytes are read raw so the digest covers exactly what is committed,
+	// which also means nothing else has inspected them. A repeated member
+	// could sit before the winning value, and updating the digest would leave
+	// every canonical check green — yet a duplicate key can never be canonical
+	// output, since the parse profile rejects it before serialization.
+	if containsDuplicateKey(canonical) {
+		t.Error("same.canonical repeats a member name; canonical output cannot contain one")
 	}
 	committed, err := os.ReadFile("events/canonical/same.sha256")
 	if err != nil {
