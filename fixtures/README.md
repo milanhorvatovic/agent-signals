@@ -25,10 +25,11 @@ name and is rejected by the schema, one step before cross-entry detection
 would apply — the validator's own alias rule stays defence in depth for input
 that has not been through the schema yet.
 
-Oversized corpora are generated, not committed: `internal/fixturegen`
-deterministically produces the >16 MiB supervision-window stream
-(§Overflow) and duplicate replay sets larger than any in-memory cache
-(§Spool and cursors).
+Two corpora are missing here on purpose, and are not yet provided anywhere:
+the >16 MiB supervision-window stream (§Overflow) and duplicate replay sets
+larger than any in-memory cache (§Spool and cursors). Both are too large to
+commit, so they will be produced deterministically by a generator that
+arrives with the code that needs them.
 
 | Fixture | Contract anchor | Expectation |
 | :-- | :-- | :-- |
@@ -42,7 +43,7 @@ deterministically produces the >16 MiB supervision-window stream
 | `events/invalid/multiline-summary.jsonl` | §Event one-line summary | reject |
 | `events/invalid/missing-id.jsonl`, `empty-summary.jsonl`, `array-top-level.jsonl` | §Event required fields / top-level object | reject |
 | `events/canonical/same-{a,b}.jsonl`, `same.canonical`, `same.sha256` | §Spool and cursors canonical serialization | both digest to `same.sha256`; canonical bytes equal `same.canonical` |
-| `events/canonical/lexeme-{int,float}.jsonl` | §Spool number-lexeme preservation | `1` and `1.0` digest differently |
+| `events/canonical/lexeme-{int,float}.jsonl` | §Spool number-lexeme preservation | `1` and `1.0` digest differently; `data.n` is the pair's only difference, so nothing else can account for the split |
 | `events/canonical/conflict-{a,b}.jsonl` | §Spool duplicate vs conflict | same ID, different digest — hard conflict |
 | `events/limits/*` | §Manifest `max_event_bytes`, §Watcher requirement 1 | `exact-limit` (512 B incl. newline, per `limits.json`) ingests; `over-limit` rejects before JSON decoding |
 | `manifest/valid/*.yaml` | §Manifest | validate; the minimal fixtures leave optionals absent to take defaults, and `all-options` sets every one of them to a non-default value. `empty-command-element` pins the boundary: the argv *array* must be non-empty, an individual argument may be the empty string |

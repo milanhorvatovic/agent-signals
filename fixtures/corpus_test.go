@@ -278,19 +278,24 @@ func TestGapIDsRecompute(t *testing.T) {
 			t.Fatalf("%s: %v", path, err)
 		}
 		// cursor_id is <consumer>/<instance>/<source>; <safe-instance> is the
-		// lowercase hex SHA-256 of the instance's UTF-8 bytes.
-		parts := strings.SplitN(rec.Data.CursorID, "/", 3)
-		if len(parts) != 3 {
+		// lowercase hex SHA-256 of the instance's UTF-8 bytes. Consumer and
+		// source are slugs that cannot contain a slash, but instance is an
+		// opaque string that can, so it is everything between them rather than
+		// the second of three fields.
+		head := strings.Index(rec.Data.CursorID, "/")
+		tail := strings.LastIndex(rec.Data.CursorID, "/")
+		if head < 0 || head == tail {
 			t.Fatalf("%s: cursor_id %q is not <consumer>/<instance>/<source>", path, rec.Data.CursorID)
 		}
-		instance := sha256.Sum256([]byte(parts[1]))
+		consumer, source := rec.Data.CursorID[:head], rec.Data.CursorID[tail+1:]
+		instance := sha256.Sum256([]byte(rec.Data.CursorID[head+1 : tail]))
 		var derivation []string
 		if rec.Data.FirstAvailableID != "" {
-			derivation = []string{"gap", "retained", parts[0], hex.EncodeToString(instance[:]), parts[2], rec.Data.FirstAvailableID}
+			derivation = []string{"gap", "retained", consumer, hex.EncodeToString(instance[:]), source, rec.Data.FirstAvailableID}
 		} else {
 			// Empty-source variant: the record derives from the retention
 			// tombstone, and ts is the removal time.
-			derivation = []string{"gap", "empty", parts[0], hex.EncodeToString(instance[:]), parts[2], rec.Data.LastRemovedID, rec.TS}
+			derivation = []string{"gap", "empty", consumer, hex.EncodeToString(instance[:]), source, rec.Data.LastRemovedID, rec.TS}
 		}
 		// Every element is a control-free ASCII string, so canonical
 		// serialization is Go's escape-free array encoding.
@@ -345,16 +350,48 @@ func TestCanonicalInputsAgree(t *testing.T) {
 
 // TestNumberLexemesDiffer pins the pair the canonicalization rules exist for:
 // 1 and 1.0 are the same value and different lexemes, so they must not
-// collapse into one another.
+// collapse into one another. The pair only demonstrates that if data.n is the
+// single difference between the two records — any other differing field would
+// separate their digests on its own and prove nothing about lexemes.
 func TestNumberLexemesDiffer(t *testing.T) {
-	i := decodeWithNumbers(t, "events/canonical/lexeme-int.jsonl")
-	f := decodeWithNumbers(t, "events/canonical/lexeme-float.jsonl")
-	get := func(v any) string {
-		n, _ := v.(map[string]any)["data"].(map[string]any)["n"].(json.Number)
+	i := decodeWithNumbers(t, "events/canonical/lexeme-int.jsonl").(map[string]any)
+	f := decodeWithNumbers(t, "events/canonical/lexeme-float.jsonl").(map[string]any)
+	get := func(v map[string]any) string {
+		n, _ := v["data"].(map[string]any)["n"].(json.Number)
 		return n.String()
 	}
 	if get(i) == get(f) {
 		t.Errorf("both lexeme fixtures carry n as %q; the pair must stay distinguishable", get(i))
+	}
+	for field := range i {
+		if field == "data" {
+			continue
+		}
+		if !reflect.DeepEqual(i[field], f[field]) {
+			t.Errorf("the lexeme pair differs at %q as well as data.n; only the lexeme may vary", field)
+		}
+	}
+	if len(i) != len(f) {
+		t.Errorf("the lexeme pair carries different field sets: %d and %d", len(i), len(f))
+	}
+	for field := range i["data"].(map[string]any) {
+		if field != "n" {
+			t.Errorf("data carries %q as well as n; only the lexeme may vary", field)
+		}
+	}
+}
+
+// TestConflictFixturesShareAnID pins the hard-conflict scenario: one ID
+// reused for different content, which the spool must never silently drop.
+// Schema validation alone would stay green if either fixture drifted off it.
+func TestConflictFixturesShareAnID(t *testing.T) {
+	a := decodeWithNumbers(t, "events/canonical/conflict-a.jsonl").(map[string]any)
+	b := decodeWithNumbers(t, "events/canonical/conflict-b.jsonl").(map[string]any)
+	if a["id"] != b["id"] {
+		t.Errorf("conflict fixtures carry different IDs (%v, %v); the pair is a duplicate check, not a conflict", a["id"], b["id"])
+	}
+	if reflect.DeepEqual(a, b) {
+		t.Error("conflict fixtures carry identical content; the pair is an accepted duplicate, not a hard conflict")
 	}
 }
 
@@ -407,11 +444,23 @@ func TestManifestFixtures(t *testing.T) {
 	// is exempt: case-folded-alias.yaml carries an uppercase name, which the
 	// schema's lowercase slug pattern rejects on its own.
 	validatorSide := map[string]bool{"duplicate-source.yaml": true}
+	// Exactly one fixture is rejected before the schema sees it. Treating any
+	// decode failure as that rejection would let a schema-level fixture rot
+	// into malformed YAML and still pass, and would equally let the
+	// duplicate-key fixture start decoding cleanly without anyone noticing.
+	decodeLevel := "duplicate-yaml-keys.yaml"
 	for _, path := range glob(t, "manifest/invalid/*.yaml") {
 		name := filepath.Base(path)
 		inst, err := yamlInstance(path)
+		if name == decodeLevel {
+			if err == nil {
+				t.Errorf("%s: decoded cleanly; it must be rejected at YAML decode", name)
+			}
+			continue
+		}
 		if err != nil {
-			continue // rejected at YAML decode: duplicate mapping keys
+			t.Errorf("%s: failed to decode (%v); only %s is rejected before the schema", name, err, decodeLevel)
+			continue
 		}
 		if err := s.monitors.Validate(inst); err == nil && !validatorSide[name] {
 			t.Errorf("%s: accepted, want reject", name)
