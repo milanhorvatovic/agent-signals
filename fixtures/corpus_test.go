@@ -269,7 +269,7 @@ func TestWatcherFixturesValidate(t *testing.T) {
 		{"events/limits/*.jsonl", false},
 		{"spool/*/*.jsonl", true},
 		{"ingest/*/events/*.jsonl", true},
-		{"synthetic/context/*.jsonl", true},
+		{"synthetic/context/*/*.jsonl", true},
 	}
 	for _, p := range patterns {
 		for _, path := range glob(t, p.glob) {
@@ -420,18 +420,37 @@ func TestSyntheticFixturesValidate(t *testing.T) {
 	}
 }
 
+// contextDir locates the state a synthetic fixture derives from but does not
+// contain. It is keyed by fixture rather than by source because two gap
+// variants describe two different retention states of the same source, and
+// one shared directory could only describe one of them.
+func contextDir(fixture string) string {
+	return filepath.Join("synthetic/context", strings.TrimSuffix(filepath.Base(fixture), ".jsonl"))
+}
+
 // contextEvent finds the watcher record a synthetic fixture derives from.
-// synthetic/context holds the events a gap refers to but does not contain,
-// so the derived fields can be checked against their real inputs.
-func contextEvent(t *testing.T, source, id string) (map[string]any, bool) {
+func contextEvent(t *testing.T, fixture, source, id string) (map[string]any, bool) {
 	t.Helper()
-	for _, line := range records(t, filepath.Join("synthetic/context", source+".jsonl")) {
+	for _, line := range records(t, filepath.Join(contextDir(fixture), source+".jsonl")) {
 		rec, _ := decodeJSON(t, line).(map[string]any)
 		if rec["id"] == id {
 			return rec, true
 		}
 	}
 	return nil, false
+}
+
+// contextTombstone reads the retention state a gap derives from.
+func contextTombstone(t *testing.T, fixture, source string) (removedID, removedAt string) {
+	t.Helper()
+	path := filepath.Join(contextDir(fixture), source+".tombstone.json")
+	tomb, _ := decodeWithNumbers(t, path).(map[string]any)
+	if src, _ := tomb["source"].(string); src != source {
+		t.Errorf("%s: tombstone is for source %q, record is from %q", path, src, source)
+	}
+	removedID, _ = tomb["last_removed_id"].(string)
+	removedAt, _ = tomb["removed_at"].(string)
+	return removedID, removedAt
 }
 
 // renderInterpolatedID applies §Rotation's truncation rule for an ID placed
@@ -596,11 +615,16 @@ func TestGapIDsRecompute(t *testing.T) {
 			// ts is the first available event's timestamp, so the retained
 			// variant is only checkable against that event. Without the
 			// companion record any schema-valid ts would pass.
-			first, found := contextEvent(t, rec.Source, rec.Data.FirstAvailableID)
+			first, found := contextEvent(t, path, rec.Source, rec.Data.FirstAvailableID)
 			if !found {
 				t.Errorf("%s: no companion record for first_available_id %q; ts cannot be verified", path, rec.Data.FirstAvailableID)
 			} else if ts, _ := first["ts"].(string); ts != rec.TS {
 				t.Errorf("%s: ts is %q, the first available event %q is at %q", path, rec.TS, rec.Data.FirstAvailableID, ts)
+			}
+			// last_removed_id sits in neither the digest nor the summary, so
+			// it is anchored only by the retention state it reports.
+			if removedID, _ := contextTombstone(t, path, rec.Source); rec.Data.LastRemovedID != removedID {
+				t.Errorf("%s: last_removed_id is %q, the tombstone removed through %q", path, rec.Data.LastRemovedID, removedID)
 			}
 		}
 		if rec.Summary != wantSummary {
@@ -615,12 +639,7 @@ func TestGapIDsRecompute(t *testing.T) {
 			// rather than from the record, because deriving from the record's
 			// own ts would be circular — editing ts and recomputing the ID
 			// would agree with itself and prove nothing.
-			tomb := decodeWithNumbers(t, filepath.Join("synthetic/context", rec.Source+".tombstone.json")).(map[string]any)
-			removedID, _ := tomb["last_removed_id"].(string)
-			removedAt, _ := tomb["removed_at"].(string)
-			if src, _ := tomb["source"].(string); src != rec.Source {
-				t.Errorf("%s: tombstone is for source %q, record is from %q", path, src, rec.Source)
-			}
+			removedID, removedAt := contextTombstone(t, path, rec.Source)
 			if rec.Data.LastRemovedID != removedID {
 				t.Errorf("%s: last_removed_id is %q, the tombstone removed through %q", path, rec.Data.LastRemovedID, removedID)
 			}
@@ -1413,6 +1432,12 @@ func TestValidManifestFixturesKeepTheirCase(t *testing.T) {
 			}
 		},
 		"minimal.yaml": func(t *testing.T, entries []any) {
+			// An empty array satisfies the schema and would make the loop
+			// below vacuous, leaving this a second copy of the empty.yaml case
+			// while the required-fields-only monitor quietly disappeared.
+			if len(entries) == 0 {
+				t.Fatal("carries no monitor; this fixture is the required-fields-only entry")
+			}
 			required := map[string]bool{"name": true, "command": true, "description": true, "trigger": true, "tiers": true}
 			for _, e := range entries {
 				for field := range e.(map[string]any) {
