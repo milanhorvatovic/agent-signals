@@ -18,6 +18,17 @@ still decode to what `same.canonical` describes, the number-lexeme pair must
 stay distinguishable, and every optional manifest field must be set by some
 valid fixture.
 
+The checkpoint, retention, and cursor documents carry no schema, so their
+meaning is entirely in how they relate to the event files beside them, and
+the guard asserts those relations directly: a checkpoint never holds a
+synthetic ID, the synthetic-tail checkpoint sits exactly at its overflow
+record's `last_dropped_id`, the stale checkpoint names a spooled event that
+is not the tail, the missing one has no document at all, a retention
+high-water mark is never below a retained overflow sequence, the fresh cursor
+is null/0/empty with a creation baseline, the legacy cursor still omits the
+fairness fields, and every cursor directory is the SHA-256 of the instance
+retained inside it.
+
 A case-folded alias between two schema-valid names is unreachable: `name` is
 lowercase ASCII by grammar, and two distinct lowercase strings cannot collide
 under case folding. `case-folded-alias.yaml` therefore carries an uppercase

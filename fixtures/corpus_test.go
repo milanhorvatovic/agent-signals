@@ -13,9 +13,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -524,7 +526,17 @@ func TestManifestFixtures(t *testing.T) {
 			t.Errorf("%s: failed to decode (%v); only %s is rejected before the schema", name, err, decodeLevel)
 			continue
 		}
-		if err := s.monitors.Validate(inst); err == nil && !validatorSide[name] {
+		err = s.monitors.Validate(inst)
+		if validatorSide[name] {
+			// This one is rejected by cross-entry validation alone, so it must
+			// still be schema-valid: a missing required field or an
+			// out-of-range value here would pass for the wrong reason.
+			if err != nil {
+				t.Errorf("%s: %v — it must be schema-valid and rejected only by the validator", name, err)
+			}
+			continue
+		}
+		if err == nil {
 			t.Errorf("%s: accepted, want reject", name)
 		}
 	}
@@ -626,6 +638,257 @@ func TestLimitFixtureBounds(t *testing.T) {
 		}
 		if !ok(info.Size()) {
 			t.Errorf("%s is %d bytes against a %d-byte limit", name, info.Size(), limits.MaxEventBytes)
+		}
+	}
+}
+
+// --- state fixtures -------------------------------------------------------
+//
+// The checkpoint, retention, and cursor documents are the corpus's other
+// half: they carry no schema, and their meaning lives in how they relate to
+// the event files beside them. Validating events alone left every one of
+// those relationships free to drift.
+
+// stateDoc decodes one JSON state fixture.
+func stateDoc(t *testing.T, path string) map[string]any {
+	t.Helper()
+	doc, ok := decodeWithNumbers(t, path).(map[string]any)
+	if !ok {
+		t.Fatalf("%s is not a JSON object", path)
+	}
+	return doc
+}
+
+// overflowSequences collects every overflow sequence number appearing in the
+// JSONL files under dir.
+func overflowSequences(t *testing.T, dir string) []int64 {
+	t.Helper()
+	var seqs []int64
+	prefix := reservedPfx + "overflow:"
+	if err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Ext(p) != ".jsonl" {
+			return err
+		}
+		for _, line := range records(t, p) {
+			id := recordID(decodeJSON(t, line))
+			if !strings.HasPrefix(id, prefix) {
+				continue
+			}
+			n, convErr := strconv.ParseInt(id[strings.LastIndex(id, ":")+1:], 10, 64)
+			if convErr != nil {
+				t.Errorf("%s: overflow ID %q has no decimal sequence", p, id)
+				continue
+			}
+			seqs = append(seqs, n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return seqs
+}
+
+// TestCheckpointsHoldWatcherOriginIDs pins the rule the synthetic-tail
+// fixture exists to demonstrate: a synthetic ID never advances watcher
+// ingestion state, so it can never be handed back as --since-id.
+func TestCheckpointsHoldWatcherOriginIDs(t *testing.T) {
+	for _, path := range glob(t, "ingest/*/ingest/*.json") {
+		doc := stateDoc(t, path)
+		lastID, _ := doc["last_id"].(string)
+		if strings.HasPrefix(lastID, reservedPfx) {
+			t.Errorf("%s: checkpoint holds the synthetic ID %q", path, lastID)
+		}
+		if lastID == "" {
+			t.Errorf("%s: checkpoint carries no last_id", path)
+		}
+	}
+}
+
+// TestSyntheticTailCheckpointClearsTheDrop pins the recoverable-overflow
+// rule: once the record is committed the checkpoint advances through the last
+// dropped ID, so replay resumes past the loss instead of stalling on it.
+func TestSyntheticTailCheckpointClearsTheDrop(t *testing.T) {
+	doc := stateDoc(t, "ingest/synthetic-tail/ingest/pr-comments.json")
+	var lastDropped string
+	for _, line := range records(t, "ingest/synthetic-tail/events/pr-comments.jsonl") {
+		var rec struct {
+			ID   string `json:"id"`
+			Data struct {
+				LastDroppedID string `json:"last_dropped_id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(rec.ID, reservedPfx+"overflow:") {
+			lastDropped = rec.Data.LastDroppedID
+		}
+	}
+	if lastDropped == "" {
+		t.Fatal("the synthetic tail carries no recoverable overflow record")
+	}
+	if doc["last_id"] != lastDropped {
+		t.Errorf("checkpoint is at %v; the overflow record dropped through %q", doc["last_id"], lastDropped)
+	}
+}
+
+// TestStaleCheckpointLagsItsSpool pins the crash window the fixture models:
+// the spool holds an event the checkpoint has not yet recorded.
+func TestStaleCheckpointLagsItsSpool(t *testing.T) {
+	doc := stateDoc(t, "ingest/stale/ingest/pr-comments.json")
+	lines := records(t, "ingest/stale/events/pr-comments.jsonl")
+	if len(lines) < 2 {
+		t.Fatal("the stale fixture needs an event beyond the checkpoint")
+	}
+	tail := recordID(decodeJSON(t, lines[len(lines)-1]))
+	if doc["last_id"] == tail {
+		t.Errorf("checkpoint is caught up at %q; the fixture models a checkpoint left behind", tail)
+	}
+	var found bool
+	for _, line := range lines {
+		if recordID(decodeJSON(t, line)) == doc["last_id"] {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("checkpoint %v names no event in the spool", doc["last_id"])
+	}
+}
+
+// TestMissingCheckpointIsAbsent keeps the missing fixture distinguishable
+// from the stale one: its whole point is that no checkpoint document exists.
+func TestMissingCheckpointIsAbsent(t *testing.T) {
+	if _, err := os.Stat("ingest/missing/ingest"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("ingest/missing carries a checkpoint directory (%v); the fixture models one that was never written", err)
+	}
+	if len(records(t, "ingest/missing/events/pr-comments.jsonl")) == 0 {
+		t.Error("ingest/missing carries no events to rebuild the checkpoint from")
+	}
+}
+
+// TestRetentionDocumentsMatchTheirSpools pins the high-water mark against the
+// records beside it: the counter recovers from the larger of this mark and
+// the highest retained overflow sequence, so a mark below what is retained
+// would let a sequence be reallocated with different content.
+func TestRetentionDocumentsMatchTheirSpools(t *testing.T) {
+	for _, path := range glob(t, "*/*/retention/*.json") {
+		doc := stateDoc(t, path)
+		mark, err := doc["overflow_high_water"].(json.Number).Int64()
+		if err != nil {
+			t.Errorf("%s: overflow_high_water is not an integer", path)
+			continue
+		}
+		var highest int64
+		for _, seq := range overflowSequences(t, filepath.Dir(filepath.Dir(path))) {
+			if seq > highest {
+				highest = seq
+			}
+		}
+		if mark < highest {
+			t.Errorf("%s: high-water mark %d is below the retained overflow sequence %d", path, mark, highest)
+		}
+		tombstone, present := doc["tombstone"]
+		if !present {
+			t.Errorf("%s: no tombstone member; it is null before any removal, never absent", path)
+			continue
+		}
+		if tombstone == nil {
+			continue
+		}
+		for _, field := range []string{"last_removed_id", "removed_at"} {
+			if v, _ := tombstone.(map[string]any)[field].(string); v == "" {
+				t.Errorf("%s: tombstone carries no %s", path, field)
+			}
+		}
+	}
+}
+
+// TestFreshCursorIsBeforeEverything pins the created-but-never-acknowledged
+// state: null is the canonical before-everything position, never an empty
+// string or a sentinel ID, and the creation tombstone is the baseline later
+// retention is measured against.
+func TestFreshCursorIsBeforeEverything(t *testing.T) {
+	for _, path := range glob(t, "cursors/fresh/*/*/*.json") {
+		doc := stateDoc(t, path)
+		if v, present := doc["last_id"]; !present || v != nil {
+			t.Errorf("%s: last_id is %v; a fresh cursor sits before everything as JSON null", path, v)
+		}
+		if seq, ok := doc["served_seq"].(json.Number); !ok || seq.String() != "0" {
+			t.Errorf("%s: served_seq is %v; a new cursor stores 0 for every source", path, doc["served_seq"])
+		}
+		if list, ok := doc["offer_list"].([]any); !ok || len(list) != 0 {
+			t.Errorf("%s: offer_list is %v; nothing has been offered yet", path, doc["offer_list"])
+		}
+		if v, present := doc["offered_frontier"]; !present || v != nil {
+			t.Errorf("%s: offered_frontier is %v; no poll has returned anything yet", path, v)
+		}
+		if doc["creation_tombstone"] == nil {
+			t.Errorf("%s: no creation tombstone baseline; the null-cursor blind spot needs it", path)
+		}
+	}
+}
+
+// TestCursorFairnessOrdering pins the two-source scenario the README
+// describes: the lower served_seq is the least recently served and is
+// selected first.
+func TestCursorFairnessOrdering(t *testing.T) {
+	seqs := map[string]int64{}
+	for _, path := range glob(t, "cursors/two-sources/*/*/*.json") {
+		doc := stateDoc(t, path)
+		source, _ := doc["source"].(string)
+		n, err := doc["served_seq"].(json.Number).Int64()
+		if err != nil {
+			t.Fatalf("%s: served_seq is not an integer", path)
+		}
+		seqs[source] = n
+		if frontier, present := doc["offered_frontier"]; !present {
+			t.Errorf("%s: no offered_frontier; an advancing ack is validated against it", path)
+		} else if list, _ := doc["offer_list"].([]any); len(list) > 0 && frontier == nil {
+			t.Errorf("%s: carries an offer list with no frontier", path)
+		}
+	}
+	if len(seqs) != 2 {
+		t.Fatalf("expected two per-source cursors, got %d", len(seqs))
+	}
+	if seqs["ci-status"] >= seqs["pr-comments"] {
+		t.Errorf("ci-status served_seq %d is not below pr-comments %d; the fixture demonstrates ci-status being served first",
+			seqs["ci-status"], seqs["pr-comments"])
+	}
+}
+
+// TestLegacyCursorOmitsFairnessFields keeps the legacy fixture legacy: it
+// exists to prove the absent fields read as zero.
+func TestLegacyCursorOmitsFairnessFields(t *testing.T) {
+	for _, path := range glob(t, "cursors/legacy-no-fairness/*/*/*.json") {
+		doc := stateDoc(t, path)
+		for _, field := range []string{"last_seen_at", "served_seq"} {
+			if _, present := doc[field]; present {
+				t.Errorf("%s: carries %s; the fixture models a document written before those fields existed", path, field)
+			}
+		}
+	}
+}
+
+// TestCursorDirectoriesUseTheInstanceHash pins the one path transformation
+// every implementation has to agree on: <safe-instance> is the lowercase hex
+// SHA-256 of the opaque instance retained inside the document.
+func TestCursorDirectoriesUseTheInstanceHash(t *testing.T) {
+	for _, path := range glob(t, "cursors/*/*/*/*.json") {
+		doc := stateDoc(t, path)
+		instance, _ := doc["instance"].(string)
+		if instance == "" {
+			t.Errorf("%s: no instance retained in the document", path)
+			continue
+		}
+		digest := sha256.Sum256([]byte(instance))
+		if got, want := filepath.Base(filepath.Dir(path)), hex.EncodeToString(digest[:]); got != want {
+			t.Errorf("%s:\n  directory %s\n  sha256(%q) %s", path, got, instance, want)
+		}
+		if consumer, _ := doc["consumer"].(string); consumer != filepath.Base(filepath.Dir(filepath.Dir(path))) {
+			t.Errorf("%s: consumer %q does not match its path component", path, consumer)
+		}
+		if source, _ := doc["source"].(string); source+".json" != filepath.Base(path) {
+			t.Errorf("%s: source %q does not match its filename", path, source)
 		}
 	}
 }
