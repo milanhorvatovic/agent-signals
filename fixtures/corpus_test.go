@@ -703,14 +703,19 @@ func TestNumberLexemesDiffer(t *testing.T) {
 	}
 }
 
-// TestConflictFixturesShareAnID pins the hard-conflict scenario: one ID
+// TestConflictFixturesShareAnID pins the hard-conflict scenario: one identity
 // reused for different content, which the spool must never silently drop.
-// Schema validation alone would stay green if either fixture drifted off it.
+// Identity is the pair (source, id), so both halves have to match — two
+// records sharing an id across different sources are separate events, not a
+// conflict. Schema validation alone would stay green if either drifted off it.
 func TestConflictFixturesShareAnID(t *testing.T) {
 	a := decodeWithNumbers(t, "events/canonical/conflict-a.jsonl").(map[string]any)
 	b := decodeWithNumbers(t, "events/canonical/conflict-b.jsonl").(map[string]any)
-	if a["id"] != b["id"] {
-		t.Errorf("conflict fixtures carry different IDs (%v, %v); the pair is a duplicate check, not a conflict", a["id"], b["id"])
+	for _, field := range []string{"source", "id"} {
+		if a[field] != b[field] {
+			t.Errorf("conflict fixtures differ at %q (%v, %v); identity is the pair (source, id), so this is not a conflict",
+				field, a[field], b[field])
+		}
 	}
 	if reflect.DeepEqual(a, b) {
 		t.Error("conflict fixtures carry identical content; the pair is an accepted duplicate, not a hard conflict")
@@ -1080,11 +1085,16 @@ func TestMissingCheckpointIsAbsent(t *testing.T) {
 	}
 }
 
-// TestRetentionDocumentsMatchTheirSpools pins the high-water mark against the
-// records beside it: the counter recovers from the larger of this mark and
-// the highest retained overflow sequence, so a mark below what is retained
-// would let a sequence be reallocated with different content.
-func TestRetentionDocumentsMatchTheirSpools(t *testing.T) {
+// TestRetentionDocuments checks what a retention document owes the spool
+// beside it: a usable high-water mark, a tombstone that names something
+// actually removed, and sequences allocated once each.
+//
+// It deliberately does not require the mark to be at or above the highest
+// retained overflow sequence. Recovery takes max(mark, highest retained)
+// precisely so that a crash between appending the record and committing the
+// mark is survivable, so a low mark is an expected state rather than a
+// defect, and a guard rejecting it would fail a valid recovery fixture.
+func TestRetentionDocuments(t *testing.T) {
 	for _, path := range glob(t, "*/*/retention/*.json") {
 		doc := stateDoc(t, path)
 		mark, err := doc["overflow_high_water"].(json.Number).Int64()
