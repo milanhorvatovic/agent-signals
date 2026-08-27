@@ -10,6 +10,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -152,6 +155,11 @@ func decodeWithNumbers(t *testing.T, path string) any {
 	if err := dec.Decode(&v); err != nil {
 		t.Fatalf("decode %s: %v", path, err)
 	}
+	// Decode stops after one value and ignores whatever follows, so a second
+	// record appended to a single-record fixture would pass unnoticed.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		t.Fatalf("%s carries more than one JSON value", path)
+	}
 	return v
 }
 
@@ -252,6 +260,58 @@ func TestSyntheticFixturesValidate(t *testing.T) {
 	}
 	if seen != len(glob(t, "synthetic/*.jsonl"))+1 {
 		t.Errorf("checked %d synthetic records, want one per fixture plus the spooled overflow tail", seen)
+	}
+}
+
+// TestOverflowSummariesRenderFromData rebuilds each overflow summary from the
+// record's own reason and count. The schema pins the template and the
+// singular/plural split, but not the number itself — it cannot compare two
+// sibling members — so "dropped 2 events" against a dropped_count of 3 would
+// validate cleanly while contradicting the record it describes.
+func TestOverflowSummariesRenderFromData(t *testing.T) {
+	paths := append(glob(t, "synthetic/overflow-*.jsonl"), "ingest/synthetic-tail/events/pr-comments.jsonl")
+	seen := 0
+	for _, path := range paths {
+		for i, line := range records(t, path) {
+			var rec struct {
+				ID      string `json:"id"`
+				Summary string `json:"summary"`
+				Data    struct {
+					Reason       string `json:"reason"`
+					DroppedCount int    `json:"dropped_count"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(line, &rec); err != nil {
+				t.Fatalf("%s line %d: %v", path, i+1, err)
+			}
+			if !strings.HasPrefix(rec.ID, reservedPfx+"overflow:") {
+				continue
+			}
+			seen++
+			var want string
+			switch rec.Data.Reason {
+			case "pending_bytes_exceeded":
+				noun := "events"
+				if rec.Data.DroppedCount == 1 {
+					noun = "event"
+				}
+				want = fmt.Sprintf("dropped %d %s: pending byte cap exceeded", rec.Data.DroppedCount, noun)
+			case "line_limit_exceeded":
+				want = "dropped an unparseable oversized line"
+			case "malformed_line":
+				want = "dropped an unparseable malformed line"
+			default:
+				t.Errorf("%s line %d: reason %q is outside the closed vocabulary", path, i+1, rec.Data.Reason)
+				continue
+			}
+			if rec.Summary != want {
+				t.Errorf("%s line %d:\n  summary %q\n  renders %q from reason %q and count %d",
+					path, i+1, rec.Summary, want, rec.Data.Reason, rec.Data.DroppedCount)
+			}
+		}
+	}
+	if seen != len(glob(t, "synthetic/overflow-*.jsonl"))+1 {
+		t.Errorf("checked %d overflow records, want one per fixture plus the spooled tail", seen)
 	}
 }
 
@@ -374,9 +434,11 @@ func TestNumberLexemesDiffer(t *testing.T) {
 	if len(i) != len(f) {
 		t.Errorf("the lexeme pair carries different field sets: %d and %d", len(i), len(f))
 	}
-	for field := range i["data"].(map[string]any) {
-		if field != "n" {
-			t.Errorf("data carries %q as well as n; only the lexeme may vary", field)
+	for name, rec := range map[string]map[string]any{"lexeme-int": i, "lexeme-float": f} {
+		for field := range rec["data"].(map[string]any) {
+			if field != "n" {
+				t.Errorf("%s: data carries %q as well as n; only the lexeme may vary", name, field)
+			}
 		}
 	}
 }
@@ -538,6 +600,21 @@ func TestLimitFixtureBounds(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &limits); err != nil {
 		t.Fatal(err)
+	}
+	// The boundary has to be one a source could actually configure, so it is
+	// pinned to the schema's own floor rather than an arbitrary small number:
+	// below it, both fixtures would model an unreachable configuration.
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemas.Monitors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	props := doc.(map[string]any)["$defs"].(map[string]any)["monitor"].(map[string]any)["properties"].(map[string]any)
+	floor, err := props["max_event_bytes"].(map[string]any)["minimum"].(json.Number).Int64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.MaxEventBytes < floor {
+		t.Errorf("limits.json caps events at %d, below the schema's max_event_bytes floor of %d", limits.MaxEventBytes, floor)
 	}
 	for name, ok := range map[string]func(int64) bool{
 		"exact-limit.jsonl": func(n int64) bool { return n == limits.MaxEventBytes },
