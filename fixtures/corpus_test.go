@@ -800,22 +800,33 @@ func TestEveryOptionalManifestFieldIsExercised(t *testing.T) {
 	for _, r := range monitor["required"].([]any) {
 		required[r.(string)] = true
 	}
-	set := map[string]bool{}
-	for _, path := range glob(t, "manifest/valid/*.yaml") {
-		inst, err := yamlInstance(path)
-		if err != nil {
-			t.Fatalf("%s: %v", filepath.Base(path), err)
-		}
-		entries, _ := inst.([]any)
-		for _, e := range entries {
-			for field := range e.(map[string]any) {
-				set[field] = true
-			}
-		}
+	// all-options is the fixture that carries the guarantee, so it is held to
+	// it directly. Counting appearances across the whole valid corpus would
+	// let a field drift into another fixture, or back to its default, while
+	// the count stayed the same.
+	inst, err := yamlInstance("manifest/valid/all-options.yaml")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for field := range monitor["properties"].(map[string]any) {
-		if !required[field] && !set[field] {
-			t.Errorf("no valid fixture sets the optional field %q", field)
+	entries, _ := inst.([]any)
+	if len(entries) != 1 {
+		t.Fatalf("all-options.yaml carries %d entries, want exactly one", len(entries))
+	}
+	entry := entries[0].(map[string]any)
+	for field, spec := range monitor["properties"].(map[string]any) {
+		if required[field] {
+			continue
+		}
+		value, present := entry[field]
+		if !present {
+			t.Errorf("all-options.yaml does not set the optional field %q", field)
+			continue
+		}
+		// retention_age is unset by default and declares none, so presence is
+		// all there is to check for it.
+		def, hasDefault := spec.(map[string]any)["default"]
+		if hasDefault && fmt.Sprint(value) == fmt.Sprint(def) {
+			t.Errorf("all-options.yaml sets %q to its default %v; the fixture exists to exercise non-default values", field, def)
 		}
 	}
 }
@@ -870,8 +881,12 @@ func TestLimitFixtureBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if limits.MaxEventBytes < floor {
-		t.Errorf("limits.json caps events at %d, below the schema's max_event_bytes floor of %d", limits.MaxEventBytes, floor)
+	// Equal to the floor, not merely at or above it: the corpus documents this
+	// as the smallest boundary a conforming source can configure, and raising
+	// the limit with both files resized to match would keep a below-floor
+	// check green while the fixture no longer sat at that boundary.
+	if limits.MaxEventBytes != floor {
+		t.Errorf("limits.json caps events at %d; the smallest configurable boundary is the schema's floor of %d", limits.MaxEventBytes, floor)
 	}
 	for name, ok := range map[string]func(int64) bool{
 		"exact-limit.jsonl": func(n int64) bool { return n == limits.MaxEventBytes },
@@ -1067,8 +1082,35 @@ func TestRetentionDocumentsMatchTheirSpools(t *testing.T) {
 			t.Errorf("%s: no tombstone member; it is null before any removal, never absent", path)
 			continue
 		}
-		if tombstone != nil {
-			assertTombstone(t, path+" tombstone", tombstone)
+		if tombstone == nil {
+			continue
+		}
+		assertTombstone(t, path+" tombstone", tombstone)
+		// A tombstone records what retention removed, so naming a still
+		// retained event would make the document contradict the spool it
+		// accompanies. Ordering comes from the fixtures' own <id>-<n>
+		// sequence, as in the multi-segment layout check.
+		removed, _ := tombstone.(map[string]any)["last_removed_id"].(string)
+		removedSeq, err := strconv.ParseInt(removed[strings.LastIndex(removed, "-")+1:], 10, 64)
+		if err != nil {
+			t.Errorf("%s: last_removed_id %q does not end in the fixtures' decimal sequence", path, removed)
+			continue
+		}
+		oldest, found := int64(0), false
+		for _, events := range glob(t, filepath.Join(filepath.Dir(filepath.Dir(path)), "*.jsonl")) {
+			for _, line := range records(t, events) {
+				id := recordID(decodeJSON(t, line))
+				n, convErr := strconv.ParseInt(id[strings.LastIndex(id, "-")+1:], 10, 64)
+				if convErr != nil {
+					continue
+				}
+				if !found || n < oldest {
+					oldest, found = n, true
+				}
+			}
+		}
+		if found && removedSeq >= oldest {
+			t.Errorf("%s: tombstone removed %q, but %q is still retained", path, removed, fmt.Sprintf("pr-%d", oldest))
 		}
 	}
 }
@@ -1080,8 +1122,14 @@ func TestRetentionDocumentsMatchTheirSpools(t *testing.T) {
 func TestFreshCursorIsBeforeEverything(t *testing.T) {
 	for _, path := range glob(t, "cursors/fresh/*/*/*.json") {
 		doc := stateDoc(t, path)
-		if v, present := doc["last_id"]; !present || v != nil {
-			t.Errorf("%s: last_id is %v; a fresh cursor sits before everything as JSON null", path, v)
+		// last_id and acked_at move together: a cursor created but never
+		// acknowledged has neither, and a timestamp beside a null position
+		// would be internally inconsistent while satisfying either check
+		// on its own.
+		for _, field := range []string{"last_id", "acked_at"} {
+			if v, present := doc[field]; !present || v != nil {
+				t.Errorf("%s: %s is %v; a fresh cursor has acknowledged nothing, so it is present and null", path, field, v)
+			}
 		}
 		if seq, ok := doc["served_seq"].(json.Number); !ok || seq.String() != "0" {
 			t.Errorf("%s: served_seq is %v; a new cursor stores 0 for every source", path, doc["served_seq"])
