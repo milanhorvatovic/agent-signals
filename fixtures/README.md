@@ -47,7 +47,7 @@ arrives with the code that needs them.
 | `events/valid/*.jsonl` | §Event | parse and validate; `long-summary` additionally emits the ~120-character lint warning (§Why `summary` is constrained) |
 | `events/invalid/wrong-severity.jsonl` | §Event severity enum | reject |
 | `events/invalid/non-utc-ts.jsonl` | §Event `ts` UTC | reject: numeric offset |
-| `events/invalid/bad-calendar-ts.jsonl` | §Event `ts` RFC 3339 | reject: passes the digit pattern, fails calendar validation |
+| `events/invalid/bad-calendar-ts.jsonl` | §Event `ts` RFC 3339 | reject: February 30 sits inside every field range the pattern pins and outside the calendar, so only the `format` assertion can reject it — the fixture fails if that assertion is ever switched off |
 | `events/invalid/empty-source.jsonl`, `uppercase-source.jsonl` | §Event `source` slug | reject before any path is formed |
 | `events/invalid/reserved-synthetic-id.jsonl` | §Event reserved prefix | reject on watcher input |
 | `events/invalid/duplicate-keys.jsonl` | §Spool and cursors parse profile | reject at decode |

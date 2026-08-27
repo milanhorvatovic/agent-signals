@@ -231,6 +231,48 @@ func TestInvalidEventFixturesReject(t *testing.T) {
 	}
 }
 
+// TestCalendarValidityNeedsFormatAssertion proves the calendar fixture
+// depends on the format assertion rather than merely being rejected. The ts
+// pattern already pins each field's range, so a value like month 13 fails on
+// the pattern alone and would keep passing with AssertFormat removed — the
+// fixture would then guard nothing it claims to guard. February 30 is inside
+// every field range and outside the calendar, so only the format assertion
+// can reject it.
+func TestCalendarValidityNeedsFormatAssertion(t *testing.T) {
+	c := jsonschema.NewCompiler()
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemas.Event))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddResource(eventID, doc); err != nil {
+		t.Fatal(err)
+	}
+	lenient, err := c.Compile(eventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := decodeJSON(t, records(t, "events/invalid/bad-calendar-ts.jsonl")[0])
+	if err := lenient.Validate(inst); err != nil {
+		t.Errorf("rejected without format assertion (%v); the fixture must isolate calendar validity, which the pattern cannot express", err)
+	}
+	if err := compile(t).watcher.Validate(inst); err == nil {
+		t.Error("accepted with format assertion enabled")
+	}
+}
+
+// TestLongSummaryCrossesTheLintBoundary pins the one fixture whose
+// expectation is deliberately outside the schema: §Why `summary` is
+// constrained sets a ~120-character target enforced as a lint warning, so
+// nothing in the schema would notice this fixture being shortened under it.
+func TestLongSummaryCrossesTheLintBoundary(t *testing.T) {
+	const target = 120
+	rec := decodeJSON(t, records(t, "events/valid/long-summary.jsonl")[0])
+	summary, _ := rec.(map[string]any)["summary"].(string)
+	if n := len([]rune(summary)); n <= target {
+		t.Errorf("summary is %d scalars; this fixture exists to sit above the ~%d-character lint target", n, target)
+	}
+}
+
 // TestDuplicateKeyFixtureRepeatsAKey asserts the property its fixture exists
 // for. Without this the exemption above would leave the file unchecked, and
 // rewriting it into ordinary valid JSON would keep the corpus green while the
@@ -254,6 +296,12 @@ func TestSyntheticFixturesValidate(t *testing.T) {
 		for i, line := range records(t, path) {
 			inst := decodeJSON(t, line)
 			if !strings.HasPrefix(recordID(inst), reservedPfx) {
+				// The spooled tail legitimately mixes watcher records with a
+				// synthetic one; a file under synthetic/ does not, and a
+				// watcher record there would be checked against nothing.
+				if strings.HasPrefix(path, "synthetic/") {
+					t.Errorf("%s line %d: %q is not a synthetic record", path, i+1, recordID(inst))
+				}
 				continue
 			}
 			seen++
