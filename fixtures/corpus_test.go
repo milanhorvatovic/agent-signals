@@ -1008,16 +1008,18 @@ func stateDoc(t *testing.T, path string) map[string]any {
 
 // overflowSequences collects every overflow sequence number appearing in the
 // JSONL files under dir.
-func overflowSequences(t *testing.T, dir string) []int64 {
+func overflowSequences(t *testing.T, dir, source string) []int64 {
 	t.Helper()
 	var seqs []int64
-	prefix := reservedPfx + "overflow:"
+	prefix := reservedPfx + "overflow:" + source + ":"
 	if err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || filepath.Ext(p) != ".jsonl" {
 			return err
 		}
 		for _, line := range records(t, p) {
 			id := recordID(decodeJSON(t, line))
+			// Sequences are allocated per source, so two sources sharing one
+			// spool tree may legitimately both hold 000001.
 			if !strings.HasPrefix(id, prefix) {
 				continue
 			}
@@ -1146,8 +1148,9 @@ func TestRetentionDocuments(t *testing.T) {
 		// What the records themselves do owe: a sequence is allocated once per
 		// source and never reused, so two retained overflow records sharing
 		// one would mean the same number named two different drops.
+		docSource, _ := doc["source"].(string)
 		seen := map[int64]bool{}
-		for _, seq := range overflowSequences(t, filepath.Dir(filepath.Dir(path))) {
+		for _, seq := range overflowSequences(t, filepath.Dir(filepath.Dir(path)), docSource) {
 			if seen[seq] {
 				t.Errorf("%s: overflow sequence %d is allocated twice in this spool", path, seq)
 			}
@@ -1174,6 +1177,11 @@ func TestRetentionDocuments(t *testing.T) {
 		}
 		oldest, found := int64(0), false
 		for _, events := range glob(t, filepath.Join(filepath.Dir(filepath.Dir(path)), "*.jsonl")) {
+			// A tombstone is per source, so another source's lower IDs must
+			// not decide whether this one names a retained event.
+			if spoolSource(events) != docSource {
+				continue
+			}
 			for _, line := range records(t, events) {
 				id := recordID(decodeJSON(t, line))
 				n, convErr := strconv.ParseInt(id[strings.LastIndex(id, "-")+1:], 10, 64)
@@ -1232,9 +1240,21 @@ func TestFreshCursorIsBeforeEverything(t *testing.T) {
 // selected first.
 func TestCursorFairnessOrdering(t *testing.T) {
 	seqs := map[string]int64{}
+	// Fairness is ordering *within* one delivery instance, so both documents
+	// have to belong to the same (consumer, instance). Split across two
+	// correctly hashed instance directories they would each still validate,
+	// while the pair no longer demonstrated anything about fairness.
+	identity := ""
 	for _, path := range glob(t, "cursors/two-sources/*/*/*.json") {
 		doc := stateDoc(t, path)
 		source, _ := doc["source"].(string)
+		consumer, _ := doc["consumer"].(string)
+		instance, _ := doc["instance"].(string)
+		if identity == "" {
+			identity = consumer + "/" + instance
+		} else if got := consumer + "/" + instance; got != identity {
+			t.Errorf("%s: belongs to %q, the other cursor to %q; the fixture is one instance holding two sources", path, got, identity)
+		}
 		n, err := doc["served_seq"].(json.Number).Int64()
 		if err != nil {
 			t.Fatalf("%s: served_seq is not an integer", path)
@@ -1327,5 +1347,156 @@ func TestCursorDirectoriesUseTheInstanceHash(t *testing.T) {
 		}
 		// The source/filename coupling is checked for every state document in
 		// stateDoc, so it is not repeated here.
+	}
+}
+
+// --- what the positive fixtures are for ---------------------------------
+//
+// Schema validity is the floor, not the point. Each of these files is named
+// for a case the corpus advertises, and passing validation says nothing about
+// whether it still carries that case: `with-data` can lose its payload,
+// `dotted-source` can take a plain slug, `minimal` can sprout optionals, and
+// every one of them stays valid. The negatives are already held to their
+// documented clause; these are the same requirement on the other side.
+
+func TestValidEventFixturesKeepTheirCase(t *testing.T) {
+	cases := map[string]func(*testing.T, map[string]any){
+		"minimal.jsonl": func(t *testing.T, e map[string]any) {
+			if _, present := e["data"]; present {
+				t.Error("carries data; it is the fixture for an event with only the required fields")
+			}
+		},
+		"with-data.jsonl": func(t *testing.T, e map[string]any) {
+			data, _ := e["data"].(map[string]any)
+			if len(data) == 0 {
+				t.Error("carries no data payload")
+			}
+		},
+		"dotted-source.jsonl": func(t *testing.T, e map[string]any) {
+			if source, _ := e["source"].(string); !strings.Contains(source, ".") {
+				t.Errorf("source %q has no dot; the fixture exists for the dotted slug", source)
+			}
+		},
+		"error-severity.jsonl": func(t *testing.T, e map[string]any) {
+			if e["severity"] != "error" {
+				t.Errorf("severity is %v, not the error level this fixture pins", e["severity"])
+			}
+		},
+		// long-summary is pinned by TestLongSummaryCrossesTheLintBoundary.
+		"long-summary.jsonl": func(*testing.T, map[string]any) {},
+	}
+	for _, path := range glob(t, "events/valid/*.jsonl") {
+		name := filepath.Base(path)
+		check, known := cases[name]
+		if !known {
+			t.Errorf("%s: no documented case; add one so the fixture cannot quietly stop covering anything", name)
+			continue
+		}
+		rec, _ := decodeJSON(t, records(t, path)[0]).(map[string]any)
+		t.Run(name, func(t *testing.T) { check(t, rec) })
+	}
+}
+
+func TestValidManifestFixturesKeepTheirCase(t *testing.T) {
+	entriesOf := func(t *testing.T, path string) []any {
+		inst, err := yamlInstance(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		out, _ := inst.([]any)
+		return out
+	}
+	cases := map[string]func(*testing.T, []any){
+		"empty.yaml": func(t *testing.T, entries []any) {
+			if len(entries) != 0 {
+				t.Errorf("carries %d entries; this fixture is the empty root", len(entries))
+			}
+		},
+		"minimal.yaml": func(t *testing.T, entries []any) {
+			required := map[string]bool{"name": true, "command": true, "description": true, "trigger": true, "tiers": true}
+			for _, e := range entries {
+				for field := range e.(map[string]any) {
+					if !required[field] {
+						t.Errorf("sets the optional field %q; this fixture exists to leave optionals at their defaults", field)
+					}
+				}
+			}
+		},
+		"empty-command-element.yaml": func(t *testing.T, entries []any) {
+			for _, e := range entries {
+				if slices.Contains(e.(map[string]any)["command"].([]any), any("")) {
+					return
+				}
+			}
+			t.Error("no empty argv element; the fixture pins that an argument may be the empty string")
+		},
+		"two-sources.yaml": func(t *testing.T, entries []any) {
+			names := map[string]bool{}
+			for _, e := range entries {
+				names[e.(map[string]any)["name"].(string)] = true
+			}
+			if len(names) < 2 {
+				t.Errorf("carries %d distinct source names; the fixture is a multi-source manifest", len(names))
+			}
+		},
+		// example mirrors the contract's manifest block; all-options is pinned
+		// by TestEveryOptionalManifestFieldIsExercised.
+		"example.yaml":     func(*testing.T, []any) {},
+		"all-options.yaml": func(*testing.T, []any) {},
+	}
+	for _, path := range glob(t, "manifest/valid/*.yaml") {
+		name := filepath.Base(path)
+		check, known := cases[name]
+		if !known {
+			t.Errorf("%s: no documented case; add one so the fixture cannot quietly stop covering anything", name)
+			continue
+		}
+		t.Run(name, func(t *testing.T) { check(t, entriesOf(t, path)) })
+	}
+}
+
+// TestOverflowFixturesKeepTheirCase pins which variant each file carries.
+// The summary/data agreement check is internal to a record, so flipping a
+// fixture's scope or reason keeps it self-consistent and green while the
+// corpus silently stops covering that combination.
+func TestOverflowFixturesKeepTheirCase(t *testing.T) {
+	type want struct {
+		reason string
+		scope  string
+		count  int
+	}
+	cases := map[string]want{
+		"overflow-known-ids.jsonl":    {reason: "pending_bytes_exceeded", count: 3},
+		"overflow-single.jsonl":       {reason: "pending_bytes_exceeded", count: 1},
+		"overflow-fingerprint.jsonl":  {reason: "line_limit_exceeded", scope: "full"},
+		"overflow-prefix-scope.jsonl": {reason: "line_limit_exceeded", scope: "prefix"},
+		"overflow-malformed.jsonl":    {reason: "malformed_line", scope: "full"},
+	}
+	for _, path := range glob(t, "synthetic/overflow-*.jsonl") {
+		name := filepath.Base(path)
+		expected, known := cases[name]
+		if !known {
+			t.Errorf("%s: no documented variant; add one so the fixture cannot drift into a duplicate of another", name)
+			continue
+		}
+		var rec struct {
+			Data struct {
+				Reason       string `json:"reason"`
+				Scope        string `json:"fingerprint_scope"`
+				DroppedCount int    `json:"dropped_count"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(records(t, path)[0], &rec); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if rec.Data.Reason != expected.reason {
+			t.Errorf("%s: reason is %q, want %q", name, rec.Data.Reason, expected.reason)
+		}
+		if rec.Data.Scope != expected.scope {
+			t.Errorf("%s: fingerprint_scope is %q, want %q", name, rec.Data.Scope, expected.scope)
+		}
+		if rec.Data.DroppedCount != expected.count {
+			t.Errorf("%s: dropped_count is %d, want %d", name, rec.Data.DroppedCount, expected.count)
+		}
 	}
 }
