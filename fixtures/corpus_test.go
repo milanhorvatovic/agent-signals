@@ -1677,8 +1677,22 @@ func TestCursorsCarryRequiredMembers(t *testing.T) {
 			}
 			switch field {
 			case "served_seq":
-				if _, ok := value.(json.Number); !ok {
+				// A new cursor is seeded at 0 and the value only ever moves
+				// forward, so it is a non-negative integer. "Is a number"
+				// would accept -1 or 2.5, and the fairness test compares two
+				// of these against each other rather than against zero.
+				num, ok := value.(json.Number)
+				if !ok {
 					t.Errorf("%s: served_seq is %v, want a number", path, value)
+					continue
+				}
+				seq, err := num.Int64()
+				if err != nil {
+					t.Errorf("%s: served_seq is %v, want an integer", path, num)
+					continue
+				}
+				if seq < 0 {
+					t.Errorf("%s: served_seq is %d; cursors start at 0 and only advance", path, seq)
 				}
 			case "offer_list":
 				if _, ok := value.([]any); !ok {
