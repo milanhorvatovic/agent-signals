@@ -179,6 +179,20 @@ func glob(t *testing.T, pattern string) []string {
 	return m
 }
 
+// spoolSource derives the source a spool file belongs to from its name:
+// <source>.jsonl for the active file, <source>.<seq>.jsonl for an archive. A
+// source may itself contain dots, so only an all-digit final segment is
+// treated as the rotation suffix.
+func spoolSource(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		if _, err := strconv.Atoi(name[i+1:]); err == nil {
+			return name[:i]
+		}
+	}
+	return name
+}
+
 func recordID(inst any) string {
 	obj, _ := inst.(map[string]any)
 	id, _ := obj["id"].(string)
@@ -190,15 +204,21 @@ func recordID(inst any) string {
 // by construction: the reserved prefix is service-owned.
 func TestWatcherFixturesValidate(t *testing.T) {
 	s := compile(t)
-	patterns := []string{
-		"events/valid/*.jsonl",
-		"events/canonical/*.jsonl",
-		"events/limits/*.jsonl",
-		"spool/*/*.jsonl",
-		"ingest/*/events/*.jsonl",
+	// perSource marks the patterns whose filenames name the spool they belong
+	// to. The standalone event fixtures are named for what they demonstrate,
+	// so no such coupling exists for them.
+	patterns := []struct {
+		glob      string
+		perSource bool
+	}{
+		{"events/valid/*.jsonl", false},
+		{"events/canonical/*.jsonl", false},
+		{"events/limits/*.jsonl", false},
+		{"spool/*/*.jsonl", true},
+		{"ingest/*/events/*.jsonl", true},
 	}
 	for _, p := range patterns {
-		for _, path := range glob(t, p) {
+		for _, path := range glob(t, p.glob) {
 			for i, line := range records(t, path) {
 				inst := decodeJSON(t, line)
 				err := s.watcher.Validate(inst)
@@ -208,6 +228,15 @@ func TestWatcherFixturesValidate(t *testing.T) {
 					t.Errorf("%s line %d: synthetic ID accepted as watcher input", path, i+1)
 				case !synth && err != nil:
 					t.Errorf("%s line %d: %v", path, i+1, err)
+				}
+				if !p.perSource {
+					continue
+				}
+				// A spool holds one source. Every record here is schema-valid
+				// with any slug in that field, so without this a fixture could
+				// model cross-source corruption while claiming to be a spool.
+				if source, _ := inst.(map[string]any)["source"].(string); source != spoolSource(path) {
+					t.Errorf("%s line %d: record is from %q, the file is the %q spool", path, i+1, source, spoolSource(path))
 				}
 			}
 		}
@@ -807,12 +836,19 @@ func assertTombstone(t *testing.T, label string, v any) {
 	}
 }
 
-// stateDoc decodes one JSON state fixture.
+// stateDoc decodes one JSON state fixture. Every one of them — checkpoint,
+// retention, cursor — is a per-source document named for its source, so the
+// coupling is enforced here rather than in each caller: the member is
+// otherwise just a string, and pointing it at another valid slug would leave
+// every state guard green while the document described a different spool.
 func stateDoc(t *testing.T, path string) map[string]any {
 	t.Helper()
 	doc, ok := decodeWithNumbers(t, path).(map[string]any)
 	if !ok {
 		t.Fatalf("%s is not a JSON object", path)
+	}
+	if source, _ := doc["source"].(string); source+".json" != filepath.Base(path) {
+		t.Errorf("%s: document is for source %q", path, source)
 	}
 	return doc
 }
@@ -1079,8 +1115,7 @@ func TestCursorDirectoriesUseTheInstanceHash(t *testing.T) {
 		if consumer, _ := doc["consumer"].(string); consumer != filepath.Base(filepath.Dir(filepath.Dir(path))) {
 			t.Errorf("%s: consumer %q does not match its path component", path, consumer)
 		}
-		if source, _ := doc["source"].(string); source+".json" != filepath.Base(path) {
-			t.Errorf("%s: source %q does not match its filename", path, source)
-		}
+		// The source/filename coupling is checked for every state document in
+		// stateDoc, so it is not repeated here.
 	}
 }
