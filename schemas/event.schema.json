@@ -168,8 +168,8 @@
         {
           "properties": {
             "id": {
-              "description": "agent-signals:synthetic:overflow:<source>:<seq> — a monotonically allocated per-source decimal counter, zero-padded to six digits and widening beyond without truncation (event-contract.md §Overflow).",
-              "pattern": "^agent-signals:synthetic:overflow:[a-z0-9][a-z0-9._-]*:[0-9]{6,}$"
+              "description": "agent-signals:synthetic:overflow:<source>:<seq> — a monotonically allocated per-source decimal counter, zero-padded to six digits and widening beyond without truncation (event-contract.md §Overflow). The pattern pins the canonical grammar: the source stays within its 128-scalar slug bound, and the sequence is exactly six digits for values up to 999999 — never 000000, since allocation starts at 1 — then unpadded decimal beyond.",
+              "pattern": "^agent-signals:synthetic:overflow:[a-z0-9][a-z0-9._-]{0,127}:(00000[1-9]|0000[1-9][0-9]|000[1-9][0-9]{2}|00[1-9][0-9]{3}|0[1-9][0-9]{4}|[1-9][0-9]{5,})$"
             },
             "kind": { "const": "overflow" },
             "severity": { "const": "warn" },
