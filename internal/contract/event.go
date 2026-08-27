@@ -171,8 +171,23 @@ func parseTimestamp(raw string) (time.Time, error) {
 // between gap and overflow, so validating a spool record against it would
 // accept a spooled gap — a record no conforming service ever writes.
 func profileSchema(profile Profile, id string) (*jsonschema.Schema, error) {
+	// The profile decides which records are admitted, so an unrecognized one
+	// fails closed. Falling through would hand an ordinary event the watcher
+	// schema and admit an overflow record, treating an out-of-range value as
+	// though the caller had named a valid non-watcher stream.
+	switch profile {
+	case WatcherInput, SpoolRecord, DeliveryRecord:
+	default:
+		return nil, fmt.Errorf("unknown record profile %d", int(profile))
+	}
 	schemas := compiledSchemas()
 	switch {
+	case !strings.HasPrefix(id, SyntheticIDPrefix) && profile == DeliveryRecord:
+		// Delivery output may carry an oversized event's projection, whose
+		// data is the reserved marker the watcher schema rejects. The ID has
+		// no reserved prefix on this branch, so the clause the base schema
+		// leaves out is already covered above.
+		return schemas.deliveryEvent, nil
 	case !strings.HasPrefix(id, SyntheticIDPrefix):
 		return schemas.watcherEvent, nil
 	case profile == WatcherInput:
@@ -189,7 +204,11 @@ func profileSchema(profile Profile, id string) (*jsonschema.Schema, error) {
 }
 
 type schemaSet struct {
-	watcherEvent  *jsonschema.Schema
+	watcherEvent *jsonschema.Schema
+	// deliveryEvent is the shared field rules without the watcher-only
+	// clauses, which is what an ordinary delivery record answers to: the
+	// projection marker is legal there and nowhere else.
+	deliveryEvent *jsonschema.Schema
 	gapEvent      *jsonschema.Schema
 	overflowEvent *jsonschema.Schema
 	manifest      *jsonschema.Schema
@@ -216,6 +235,7 @@ var compiledSchemas = sync.OnceValue(func() *schemaSet {
 	}
 	return &schemaSet{
 		watcherEvent:  c.MustCompile(eventURL),
+		deliveryEvent: c.MustCompile(eventURL + "#/$defs/baseEvent"),
 		gapEvent:      c.MustCompile(eventURL + "#/$defs/gapEvent"),
 		overflowEvent: c.MustCompile(eventURL + "#/$defs/overflowEvent"),
 		manifest:      c.MustCompile(monitorsURL),

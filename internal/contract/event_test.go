@@ -132,6 +132,48 @@ func TestUnknownSyntheticKindIsRejected(t *testing.T) {
 	}
 }
 
+// TestProjectionParsesOnlyInDelivery covers the reserved marker delivery
+// substitutes for an oversized event's data. It is a delivery representation
+// and is never appended anywhere, so the profile that admits it is the only
+// one that may: routing delivery records through the watcher schema would
+// make a conforming projection unparseable.
+func TestProjectionParsesOnlyInDelivery(t *testing.T) {
+	line := eventLine(`"summary":"an oversized event","data":{"$projected":true}`)
+	if _, _, err := ParseEventLine(line, 0, DeliveryRecord); err != nil {
+		t.Fatalf("projection rejected from delivery output: %v", err)
+	}
+	for name, profile := range map[string]Profile{"watcher input": WatcherInput, "spool": SpoolRecord} {
+		if _, _, err := ParseEventLine(line, 0, profile); err == nil {
+			t.Errorf("projection accepted as %s", name)
+		}
+	}
+	// The marker is reserved by its exact value, so an ordinary payload that
+	// merely mentions it stays legal everywhere — otherwise this test would
+	// pass just as well against a profile that rejected all data.
+	ordinary := eventLine(`"summary":"ordinary","data":{"$projected":true,"extra":1}`)
+	for name, profile := range map[string]Profile{"watcher input": WatcherInput, "delivery": DeliveryRecord} {
+		if _, _, err := ParseEventLine(ordinary, 0, profile); err != nil {
+			t.Errorf("payload that is not the marker rejected as %s: %v", name, err)
+		}
+	}
+}
+
+// TestUnknownProfileFailsClosed pins the enum as a trust boundary. Falling
+// through would hand an ordinary event the watcher schema and admit an
+// overflow record, so an out-of-range value would read as a valid
+// non-watcher stream rather than as the programming error it is.
+func TestUnknownProfileFailsClosed(t *testing.T) {
+	unknown := DeliveryRecord + 1
+	for name, line := range map[string][]byte{
+		"ordinary": eventLine(`"summary":"ordinary"`),
+		"overflow": readFixture(t, "synthetic", "overflow-single.jsonl"),
+	} {
+		if _, _, err := ParseEventLine(line, 0, unknown); err == nil {
+			t.Errorf("%s record accepted under an unknown profile", name)
+		}
+	}
+}
+
 func TestParseTimestamp(t *testing.T) {
 	const valid = "2026-08-24T09:12:03Z"
 	if _, err := parseTimestamp(valid); err != nil {

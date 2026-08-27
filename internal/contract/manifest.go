@@ -1,9 +1,11 @@
 package contract
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -19,17 +21,20 @@ const (
 	DefaultInterval      = 60 * time.Second
 	MinInterval          = 5 * time.Second
 
-	DefaultRotateBytes    = 8388608
-	DefaultRetentionBytes = 134217728
-	DefaultCursorGrace    = 7 * 24 * time.Hour
-	DefaultIdleTimeout    = 5 * time.Minute
+	DefaultRotateBytes    int64 = 8388608
+	DefaultRetentionBytes int64 = 134217728
+	DefaultCursorGrace          = 7 * 24 * time.Hour
+	DefaultIdleTimeout          = 5 * time.Minute
 )
 
-// The two manifest rules the schema cannot express: one compares entries,
-// the other compares two members of one entry.
+// The manifest rules the schema cannot express: two compare entries or
+// members of one entry, and one is about the stream the document arrives in.
 var (
-	ErrDuplicateSource = errors.New("duplicate source name")
-	ErrRotateRatio     = errors.New("rotate_bytes exceeds half of retention_bytes")
+	ErrDuplicateSource   = errors.New("duplicate source name")
+	ErrRotateRatio       = errors.New("rotate_bytes exceeds half of retention_bytes")
+	ErrMultipleDocuments = errors.New("manifest must be a single YAML document")
+
+	errEmptyManifest = errors.New("manifest must be a YAML array; an empty manifest is []")
 )
 
 // Tier names one adapter class emitted for a source.
@@ -56,9 +61,12 @@ type Monitor struct {
 	MaxEventBytes int
 	Interval      time.Duration
 
-	// Retention controls (event-contract.md §Rotation, §Manifest).
-	RotateBytes    int
-	RetentionBytes int
+	// Retention controls (event-contract.md §Rotation, §Manifest). The byte
+	// ceilings are int64 because retention_bytes reaches 1 TiB, which does
+	// not fit a 32-bit int; rotate_bytes joins it so the ratio rule compares
+	// one type.
+	RotateBytes    int64
+	RetentionBytes int64
 	// RetentionAge is unset by default, which is zero here: the contract
 	// declares no default age bound, so a source is under the byte ceiling
 	// alone until one is configured.
@@ -67,19 +75,34 @@ type Monitor struct {
 	IdleTimeout  time.Duration
 }
 
-// ParseManifest validates raw monitors.yaml bytes: strict YAML decode
-// (duplicate mapping keys rejected by the YAML layer), schema validation
-// against schemas/monitors.schema.json, then the cross-entry rules the
-// schema cannot express — duplicate and case-folded-alias source names
-// (event-contract.md §Manifest). An empty document is rejected; an empty
-// manifest is spelled [].
+// ParseManifest validates raw monitors.yaml bytes: strict YAML decode of
+// exactly one document (duplicate mapping keys rejected by the YAML layer),
+// schema validation against schemas/monitors.schema.json, then the rules the
+// schema cannot express — duplicate and case-folded-alias source names, and
+// a rotation threshold above half the retention ceiling (event-contract.md
+// §Manifest). An empty document is rejected; an empty manifest is spelled [].
 func ParseManifest(data []byte) ([]Monitor, error) {
+	// Decoded rather than unmarshalled so a second document is an error
+	// instead of silently discarded bytes: yaml.Unmarshal reads the first
+	// document of a stream and stops, so a manifest continuing after `---`
+	// would configure sources the service never supervises.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var doc any
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	if err := dec.Decode(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errEmptyManifest
+		}
 		return nil, err
 	}
 	if doc == nil {
-		return nil, errors.New("manifest must be a YAML array; an empty manifest is []")
+		return nil, errEmptyManifest
+	}
+	switch err := dec.Decode(new(any)); {
+	case errors.Is(err, io.EOF):
+	case err == nil:
+		return nil, ErrMultipleDocuments
+	default:
+		return nil, fmt.Errorf("%w: %w", ErrMultipleDocuments, err)
 	}
 	value, err := yamlToJSON(doc)
 	if err != nil {
@@ -153,11 +176,17 @@ func newMonitor(obj map[string]any) Monitor {
 	for field, dst := range map[string]*int{
 		"batch_size":      &monitor.BatchSize,
 		"max_event_bytes": &monitor.MaxEventBytes,
+	} {
+		if v, present := obj[field]; present {
+			*dst = int(mustInt64(v))
+		}
+	}
+	for field, dst := range map[string]*int64{
 		"rotate_bytes":    &monitor.RotateBytes,
 		"retention_bytes": &monitor.RetentionBytes,
 	} {
 		if v, present := obj[field]; present {
-			*dst = mustInt(v)
+			*dst = mustInt64(v)
 		}
 	}
 	for field, dst := range map[string]*time.Duration{
@@ -167,18 +196,21 @@ func newMonitor(obj map[string]any) Monitor {
 		"idle_timeout":  &monitor.IdleTimeout,
 	} {
 		if v, present := obj[field]; present {
-			*dst = time.Duration(mustInt(v)) * time.Second
+			*dst = time.Duration(mustInt64(v)) * time.Second
 		}
 	}
 	return monitor
 }
 
-func mustInt(v any) int {
+// mustInt64 reads a schema-validated integer. Every caller narrowing the
+// result to int has a schema ceiling below 2^31; the byte ceilings that do
+// not are kept at full width.
+func mustInt64(v any) int64 {
 	n, err := v.(json.Number).Int64()
 	if err != nil {
 		panic(fmt.Sprintf("schema-validated integer does not parse: %v", err))
 	}
-	return int(n)
+	return n
 }
 
 // yamlToJSON maps a yaml.v3 value tree onto the strict-decode JSON value

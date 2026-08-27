@@ -11,7 +11,9 @@
 // MaxDepth, and duplicate object keys at every depth; number lexemes are
 // preserved. Schema validation applies schemas/event.schema.json last, and a
 // reserved-prefix ID is held to the subschema of its own record kind rather
-// than to the union of both, so a gap cannot pass as a spool record.
+// than to the union of both, so a gap cannot pass as a spool record. An
+// ordinary delivery record answers to the shared field rules alone, since the
+// reserved projection marker is legal in delivery output and nowhere else.
 //
 // Canonical serialization (§Spool and cursors): the digest input for
 // duplicate/conflict detection. Byte-exact specification, pinned by the

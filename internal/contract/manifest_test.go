@@ -1,13 +1,19 @@
 package contract
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"github.com/milanhorvatovic/agent-signals/schemas"
 )
 
 func TestValidManifestFixtures(t *testing.T) {
@@ -135,6 +141,53 @@ func TestManifestCarriesEveryOptionalField(t *testing.T) {
 		if field.got == field.def {
 			t.Errorf("%s is %v, its default; the loader is not reading the fixture's value", field.name, field.got)
 		}
+	}
+}
+
+// TestManifestRejectsMultipleDocuments pins the whole input as the unit of
+// validation. yaml.Unmarshal reads the first document of a stream and stops,
+// so a manifest continuing after `---` was accepted with its later sources
+// silently unsupervised — no error, and nothing downstream to notice.
+func TestManifestRejectsMultipleDocuments(t *testing.T) {
+	one := readFixture(t, "manifest", "valid", "minimal.yaml")
+	// The first document is a fixture the suite already parses on its own, so
+	// a failure here is the second document and not a broken first one.
+	if _, err := ParseManifest(one); err != nil {
+		t.Fatalf("the single-document half of this input does not parse: %v", err)
+	}
+	stream := append(append([]byte{}, one...), []byte("---\n- name: unsupervised\n  command: [\"./w.sh\"]\n  description: a source the first document does not declare\n  trigger: session-start\n  tiers: [mcp]\n")...)
+	monitors, err := ParseManifest(stream)
+	if !errors.Is(err, ErrMultipleDocuments) {
+		t.Fatalf("got %v (%d monitors), want %v", err, len(monitors), ErrMultipleDocuments)
+	}
+}
+
+// TestRetentionBytesHoldsTheSchemaCeiling guards the width of the byte
+// fields. The schema's retention ceiling is above what a 32-bit int can
+// hold, so on such a build a narrowed field truncates the limit and the
+// rotate ratio computed from it. This passes trivially on a 64-bit builder,
+// which is the honest scope: the defect is platform-dependent and so is the
+// check that catches it.
+func TestRetentionBytesHoldsTheSchemaCeiling(t *testing.T) {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemas.Monitors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	props := doc.(map[string]any)["$defs"].(map[string]any)["monitor"].(map[string]any)["properties"].(map[string]any)
+	ceiling, err := props["retention_bytes"].(map[string]any)["maximum"].(json.Number).Int64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ceiling <= math.MaxInt32 {
+		t.Fatalf("the retention ceiling is %d, within a 32-bit int; this test covers nothing", ceiling)
+	}
+	manifest := fmt.Sprintf("- name: pr-comments\n  command: [\"./w.sh\"]\n  description: retention at the schema ceiling\n  trigger: session-start\n  tiers: [mcp]\n  retention_bytes: %d\n", ceiling)
+	monitors, err := ParseManifest([]byte(manifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if monitors[0].RetentionBytes != ceiling {
+		t.Errorf("retention_bytes loaded as %d, the manifest declares %d", monitors[0].RetentionBytes, ceiling)
 	}
 }
 
