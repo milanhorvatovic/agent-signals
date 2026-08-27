@@ -406,13 +406,17 @@ func TestLongSummaryCrossesTheLintBoundary(t *testing.T) {
 // rewriting it into ordinary valid JSON would keep the corpus green while the
 // stated decode-level expectation quietly described nothing.
 func TestDuplicateKeyFixtureRepeatsAKey(t *testing.T) {
-	line := records(t, "events/invalid/duplicate-keys.jsonl")[0]
-	if !containsDuplicateKey(line) {
-		t.Error("duplicate-keys.jsonl carries no repeated member name")
-	}
-	// The permissive path is the reason the parse profile owns this rejection.
-	if _, err := jsonschema.UnmarshalJSON(bytes.NewReader(line)); err != nil {
-		t.Errorf("a permissive decoder should accept it; the parse profile is what must reject it: %v", err)
+	// Every record, not just the first: this file is skipped by the general
+	// invalid-fixture test, so a valid line appended here would be checked by
+	// nothing at all.
+	for i, line := range records(t, "events/invalid/duplicate-keys.jsonl") {
+		if !containsDuplicateKey(line) {
+			t.Errorf("line %d carries no repeated member name", i+1)
+		}
+		// The permissive path is the reason the parse profile owns this rejection.
+		if _, err := jsonschema.UnmarshalJSON(bytes.NewReader(line)); err != nil {
+			t.Errorf("line %d: a permissive decoder should accept it; the parse profile is what must reject it: %v", i+1, err)
+		}
 	}
 }
 
@@ -687,12 +691,19 @@ func TestGapIDsRecompute(t *testing.T) {
 			}
 			derivation = []string{"gap", "empty", consumer, hex.EncodeToString(instance[:]), source, removedID, removedAt}
 		}
-		// Every element is a control-free ASCII string, so canonical
-		// serialization is Go's escape-free array encoding.
-		canonical, err := json.Marshal(derivation)
-		if err != nil {
+		// HTML escaping is off: encoding/json turns <, > and & into <,
+		// > and & by default, while the contract's canonical form
+		// carries them as raw UTF-8. Event IDs are not restricted to ASCII or
+		// to any safe subset, so a gap whose inputs contain one of those
+		// characters would otherwise be checked against a digest no
+		// conforming implementation would produce.
+		var encoded bytes.Buffer
+		enc := json.NewEncoder(&encoded)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(derivation); err != nil {
 			t.Fatal(err)
 		}
+		canonical := bytes.TrimSuffix(encoded.Bytes(), []byte("\n"))
 		digest := sha256.Sum256(canonical)
 		want := gapIDPrefix + hex.EncodeToString(digest[:])
 		if rec.ID != want {
@@ -1208,11 +1219,15 @@ func TestRetentionDocuments(t *testing.T) {
 		// one would mean the same number named two different drops.
 		docSource, _ := doc["source"].(string)
 		seen := map[int64]bool{}
+		var highest int64
 		for _, seq := range overflowSequences(t, filepath.Dir(filepath.Dir(path)), docSource) {
 			if seen[seq] {
 				t.Errorf("%s: overflow sequence %d is allocated twice in this spool", path, seq)
 			}
 			seen[seq] = true
+			if seq > highest {
+				highest = seq
+			}
 		}
 		tombstone, present := doc["tombstone"]
 		if !present {
@@ -1220,6 +1235,14 @@ func TestRetentionDocuments(t *testing.T) {
 			continue
 		}
 		if tombstone == nil {
+			// The mark may lag its records — that is the crash the recovery
+			// rule exists for — but it can only lag. It is committed after the
+			// record it covers, so where nothing has been removed and every
+			// allocated sequence is therefore still retained, a mark above the
+			// highest of them describes a record that was never appended.
+			if mark > highest {
+				t.Errorf("%s: high-water mark is %d with nothing removed, but the highest retained sequence is %d", path, mark, highest)
+			}
 			continue
 		}
 		assertTombstone(t, path+" tombstone", tombstone)
