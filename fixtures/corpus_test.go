@@ -1471,7 +1471,12 @@ func TestCursorFairnessOrdering(t *testing.T) {
 			if len(list) != 0 {
 				t.Errorf("%s: offer list is %v; entries at or before the acknowledged position are pruned on acknowledgement", path, list)
 			}
-			if frontier != doc["last_id"] {
+			// Equality alone is satisfied by two nulls, which is a cursor that
+			// has acknowledged nothing — not the acknowledged-through state
+			// this half models, and at odds with its own non-zero served_seq.
+			if acked, _ := doc["last_id"].(string); acked == "" {
+				t.Errorf("%s: last_id is %v; this cursor models a position acknowledged through a real event", path, doc["last_id"])
+			} else if frontier != doc["last_id"] {
 				t.Errorf("%s: frontier %v does not equal last_id %v; this cursor is caught up", path, frontier, doc["last_id"])
 			}
 		default:
@@ -1742,6 +1747,13 @@ func TestCursorsCarryRequiredMembers(t *testing.T) {
 	for _, path := range glob(t, "cursors/*/*/*/*.json") {
 		legacy := strings.HasPrefix(path, "cursors/legacy-no-fairness/")
 		doc := stateDoc(t, path)
+		// A position and the time it was acknowledged at describe one event,
+		// so they are null or non-null together. Checking each against the
+		// nullable set independently would let any cursor keep its position
+		// while losing the timestamp that says when it was taken.
+		if (doc["last_id"] == nil) != (doc["acked_at"] == nil) {
+			t.Errorf("%s: last_id is %v and acked_at is %v; a cursor has both or neither", path, doc["last_id"], doc["acked_at"])
+		}
 		for _, field := range []string{
 			"consumer", "instance", "source", "last_id", "acked_at",
 			"last_seen_at", "served_seq", "offered_frontier", "offer_list", "creation_tombstone",
