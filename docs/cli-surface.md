@@ -39,11 +39,11 @@ agent-signals status
   surface.
 - `poll`: starvation-free least-recently-served batch, non-blocking,
   non-advancing — §Delivery transaction.
-- `ack`: per-source monotonic advance; idempotent no-op on the cursor's
-  current position — which retention may have evicted — and on an older
-  retained ID, while any other evicted ID is rejected as unverifiable
-  unless the cursor's offer list or its outstanding gap ID still vouches
-  for it; `served_seq` update — §Delivery transaction.
+- `ack`: per-source monotonic advance, taking the next `served_seq`;
+  idempotent no-op on the cursor's current position, which retention may
+  have evicted; an advancing acknowledgement must name a retained ID at or
+  before the offered frontier, and while a gap is outstanding the gap ID is
+  the only acknowledgement that advances — §Delivery transaction, §Rotation.
 - `get`: one retained event by exact ID, touching no cursor, frontier, or
   fairness state — §CLI surface.
 - `hook`: parse hook stdin, derive instance, hand off, acknowledge accepted
