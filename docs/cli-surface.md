@@ -30,7 +30,7 @@ agent-signals status
 | `--instance <id>` | Opaque, non-empty, at most 256 Unicode scalars and no control characters, rejected before hashing or persistence; hashed (SHA-256) for filesystem use, original retained inside the cursor document (§Spool and cursors). A client with no usable host session identity supplies its durable registration ID here — one registration is one subscription. |
 | `--since-id ID` | Requires `--source`; a non-mutating replay override. A cursor-local gap ID is rejected; a retained synthetic overflow ID is a valid position like any other spool record. Distinct from the watcher handoff, where a synthetic spool record never becomes `--since-id`. |
 | `--id ID` | On `ack`, the last accepted event of one named source, or the outstanding deterministic gap ID for that cursor. On `get`, an exact retained event ID: a retained synthetic overflow record resolves like any other, gap IDs are always rejected. |
-| `<harness>` | One fixed name per generated hook adapter, drawn from the adapter families the contract declares (`codex`, `kimi-code`, `opencode`); the stable shim reads the harness's hook JSON on stdin and derives the instance itself. |
+| `<harness>` | Names one generated hook adapter, and rides in the hook command string the harness records trust against — which is what makes it identity-bearing. The contract does not enumerate harness names, so no vocabulary is frozen here: each name freezes when its adapter ships, under the additions-allowed policy above. The stable shim reads that harness's hook JSON on stdin and derives `instance` from the harness-supplied session/thread ID rather than taking it as an argument. |
 
 ## Semantics anchors (not restated here)
 
