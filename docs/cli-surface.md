@@ -25,7 +25,7 @@ agent-signals status
 
 | Argument | Rules |
 | :-- | :-- |
-| `<source>` / `--source` | Canonical lowercase slug (`^[a-z0-9][a-z0-9._-]*$`, ≤128 bytes) matching a `monitors.yaml` name; validated before any path is formed. |
+| `<source>` / `--source` | Canonical lowercase slug matching a `monitors.yaml` name: the anchorless grammar `[a-z0-9][a-z0-9._-]*` required to match the entire value under strict end-of-input semantics — `\A…\z`-style, never `$`, which some engines let match before a trailing newline — and at most 128 Unicode scalars. Validated before any path is formed. |
 | `--consumer <type>` | Same slug grammar; names the adapter family (`codex`, `kimi-code`, `opencode`, `mcp`). Never interpolated into a path unchecked. |
 | `--instance <id>` | Opaque, non-empty, at most 256 Unicode scalars and no control characters, rejected before hashing or persistence; hashed (SHA-256) for filesystem use, original retained inside the cursor document (§Spool and cursors). A client with no usable host session identity supplies its durable registration ID here — one registration is one subscription. |
 | `--since-id ID` | Requires `--source`; a non-mutating replay override. A cursor-local gap ID is rejected; a retained synthetic overflow ID is a valid position like any other spool record. Distinct from the watcher handoff, where a synthetic spool record never becomes `--since-id`. |
