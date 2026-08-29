@@ -28,14 +28,23 @@ func inspectFilesystem(dir string) (filesystem, error) {
 		return filesystem{}, err
 	}
 
-	if known, ok := filesystemMagics[int64(stat.Type)]; ok {
-		return known, nil
-	}
-
-	return filesystem{name: "0x" + strconv.FormatInt(int64(stat.Type), 16)}, nil
+	// Statfs_t.Type is int64 on 64-bit kernels and int32 on 32-bit ones, where
+	// a magic with the high bit set — CIFS, Btrfs, ramfs — arrives negative
+	// and would sign-extend past every table key, classifying CIFS as an
+	// unknown local filesystem. Narrowing to uint32 makes both widths agree;
+	// every magic is a 32-bit value, so nothing is lost on the wider one.
+	return filesystemForMagic(uint32(stat.Type)), nil
 }
 
-var filesystemMagics = map[int64]filesystem{
+func filesystemForMagic(magic uint32) filesystem {
+	if known, ok := filesystemMagics[magic]; ok {
+		return known
+	}
+
+	return filesystem{name: "0x" + strconv.FormatUint(uint64(magic), 16)}
+}
+
+var filesystemMagics = map[uint32]filesystem{
 	0x6969:     {name: "nfs", network: true},
 	0xff534d42: {name: "cifs", network: true},
 	0x517b:     {name: "smbfs", network: true},
