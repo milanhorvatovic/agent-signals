@@ -45,6 +45,38 @@ func TestProbeReportsAVerifiedMode(t *testing.T) {
 	}
 }
 
+// A path can leave the probed filesystem without leaving the directory, so
+// the check is on the opened file rather than on its name.
+func TestVerifyFileRejectsAnotherFilesystem(t *testing.T) {
+	dir := t.TempDir()
+	syncer, err := Probe(dir)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	local, err := os.CreateTemp(dir, "local")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer func() { _ = local.Close() }()
+
+	if err := syncer.VerifyFile(local); err != nil {
+		t.Errorf("file inside the probed directory rejected: %v", err)
+	}
+
+	// The device node lives on the kernel's own filesystem, never on the one
+	// holding a temporary directory.
+	foreign, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer func() { _ = foreign.Close() }()
+
+	if err := syncer.VerifyFile(foreign); !errors.Is(err, ErrForeignFilesystem) {
+		t.Errorf("VerifyFile on %s returned %v, want ErrForeignFilesystem", os.DevNull, err)
+	}
+}
+
 func TestProbeLeavesNothingBehind(t *testing.T) {
 	dir := t.TempDir()
 

@@ -83,7 +83,7 @@ func Open(root Root, source string, syncer durability.Syncer) (*Writer, error) {
 		return nil, err
 	}
 
-	lock, err := acquireWriterLock(root, source)
+	lock, err := acquireWriterLock(root, source, syncer)
 	if err != nil {
 		return nil, err
 	}
@@ -123,15 +123,23 @@ func checkSyncerRoot(root Root, syncer durability.Syncer) error {
 	return nil
 }
 
-func acquireWriterLock(root Root, source string) (*os.File, error) {
+func acquireWriterLock(root Root, source string, syncer durability.Syncer) (*os.File, error) {
 	if err := os.MkdirAll(root.writerLockDir(), 0o755); err != nil {
 		return nil, fmt.Errorf("create writer lock directory: %w", err)
 	}
 
+	// O_NOFOLLOW refuses a symlinked lock file, and the device check refuses
+	// one reached through a symlinked or separately mounted directory. Either
+	// would put the guard on a filesystem whose locking was never verified,
+	// and over a network filesystem the lock is emulated rather than held.
 	path := root.writerLockPath(source)
-	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, err
+	}
+	if err := syncer.VerifyFile(lock); err != nil {
+		_ = lock.Close()
+		return nil, err
 	}
 
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
@@ -158,10 +166,18 @@ func openEventsFile(root Root, source string, syncer durability.Syncer) (*os.Fil
 		return nil, err
 	}
 
+	// Same reasoning as the lock file: the durability mode was measured on one
+	// filesystem, and a symlinked file or a mount under events would move the
+	// spool to another while the syncer kept advertising the first one's
+	// guarantee.
 	path := root.eventsPath(source)
-	events, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
+	events, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, err
+	}
+	if err := syncer.VerifyFile(events); err != nil {
+		_ = events.Close()
+		return nil, err
 	}
 
 	// A spool file's directory entry is only durable once the directory is

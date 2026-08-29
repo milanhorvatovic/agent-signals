@@ -53,10 +53,15 @@ var ErrNetworkFilesystem = errors.New("spool state on a network filesystem is un
 // silently degrade every sync to the weaker primitive.
 var ErrUnprobed = errors.New("syncer was not created by Probe")
 
+// ErrForeignFilesystem reports a file on a filesystem this syncer never
+// probed, whose durability and locking behaviour are therefore unknown.
+var ErrForeignFilesystem = errors.New("file is not on the probed filesystem")
+
 // Syncer performs the spool's durable writes at the strongest guarantee its
 // directory was verified to support. Create one with Probe.
 type Syncer struct {
 	dir        string
+	device     uint64
 	mode       Mode
 	filesystem string
 }
@@ -78,12 +83,62 @@ func Probe(dir string) (Syncer, error) {
 		return Syncer{}, fmt.Errorf("%s is on %s: %w", absolute, volume.name, ErrNetworkFilesystem)
 	}
 
+	device, err := deviceOf(absolute)
+	if err != nil {
+		return Syncer{}, fmt.Errorf("identify the filesystem of %s: %w", absolute, err)
+	}
+
 	mode, err := probeMode(absolute, volume)
 	if err != nil {
 		return Syncer{}, err
 	}
 
-	return Syncer{dir: absolute, mode: mode, filesystem: volume.name}, nil
+	return Syncer{dir: absolute, device: device, mode: mode, filesystem: volume.name}, nil
+}
+
+// VerifyFile reports whether file sits on the filesystem this syncer probed.
+// A path can leave that filesystem without leaving the directory — a symlinked
+// component, a nested mount — and the guarantee this syncer advertises was
+// measured on one filesystem only.
+func (s Syncer) VerifyFile(file *os.File) error {
+	if !s.Verified() {
+		return ErrUnprobed
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", file.Name(), err)
+	}
+	device, err := deviceOfInfo(info)
+	if err != nil {
+		return err
+	}
+	if device != s.device {
+		return fmt.Errorf("%w: %s is on device %d, %s was probed on %d", ErrForeignFilesystem, file.Name(), device, s.dir, s.device)
+	}
+
+	return nil
+}
+
+func deviceOf(path string) (uint64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+
+	return deviceOfInfo(info)
+}
+
+// deviceOfInfo reads the device the file lives on. Two paths share a device
+// exactly when they share a filesystem, which is the question every caller
+// here is really asking.
+func deviceOfInfo(info os.FileInfo) (uint64, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("filesystem identity is unavailable for %s", info.Name())
+	}
+
+	return uint64(stat.Dev), nil
 }
 
 // probeMode answers the question the platform cannot be asked directly: it
@@ -174,7 +229,7 @@ func (s Syncer) SyncDir(dir string) error {
 
 	handle, err := os.Open(dir)
 	if err != nil {
-		return fmt.Errorf("open %s for sync: %w", dir, err)
+		return err
 	}
 	defer func() { _ = handle.Close() }()
 

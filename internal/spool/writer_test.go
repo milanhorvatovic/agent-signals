@@ -242,6 +242,43 @@ func TestOpenRefusesAnUnprobedSyncer(t *testing.T) {
 	}
 }
 
+// A symlink at either state path would move the spool or its guard onto a
+// filesystem whose durability and locking were never verified.
+func TestOpenRejectsSymlinkedState(t *testing.T) {
+	elsewhere := t.TempDir()
+
+	cases := map[string]func(root Root) string{
+		"spool file": func(root Root) string { return root.eventsPath("pr-comments") },
+		"lock file":  func(root Root) string { return root.writerLockPath("pr-comments") },
+	}
+
+	for name, pathOf := range cases {
+		t.Run(name, func(t *testing.T) {
+			root, syncer := newRoot(t)
+			if err := os.MkdirAll(root.eventsDir(), 0o755); err != nil {
+				t.Fatalf("create events dir: %v", err)
+			}
+			if err := os.MkdirAll(root.writerLockDir(), 0o755); err != nil {
+				t.Fatalf("create lock dir: %v", err)
+			}
+
+			target := filepath.Join(elsewhere, name+".target")
+			if err := os.WriteFile(target, nil, 0o644); err != nil {
+				t.Fatalf("create target: %v", err)
+			}
+			if err := os.Symlink(target, pathOf(root)); err != nil {
+				t.Fatalf("symlink: %v", err)
+			}
+
+			_, err := Open(root, "pr-comments", syncer)
+			if err == nil {
+				t.Fatalf("opened a spool whose %s is a symlink", name)
+			}
+			t.Logf("%s symlink refused: %v", name, err)
+		})
+	}
+}
+
 func TestOpenRejectsASourceThatIsNotASlug(t *testing.T) {
 	root, syncer := newRoot(t)
 
