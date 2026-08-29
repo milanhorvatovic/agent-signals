@@ -77,10 +77,17 @@ func TestAppendRejectsRecordsThatWouldBreakFraming(t *testing.T) {
 	root, syncer := newRoot(t)
 	writer := openWriter(t, root, "pr-comments", syncer)
 
+	// Every separator a line-oriented reader may split on, not only the one
+	// this file is framed with: a record carrying a raw U+2028 is one write
+	// here and two records to a Unicode-aware consumer.
 	rejected := map[string]string{
-		"empty":            "",
-		"embedded newline": "{\"id\":\"a\"}\n{\"id\":\"b\"}",
-		"trailing newline": "{\"id\":\"a\"}\n",
+		"empty":               "",
+		"embedded newline":    "{\"id\":\"a\"}\n{\"id\":\"b\"}",
+		"trailing newline":    "{\"id\":\"a\"}\n",
+		"carriage return":     "{\"id\":\"a\r\"}",
+		"next line":           "{\"id\":\"a\u0085b\"}",
+		"line separator":      "{\"id\":\"a\u2028b\"}",
+		"paragraph separator": "{\"id\":\"a\u2029b\"}",
 	}
 	for name, record := range rejected {
 		if err := writer.Append([]byte(record)); err == nil {

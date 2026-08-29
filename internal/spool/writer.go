@@ -26,14 +26,24 @@ var ErrLocked = errors.New("another writer holds the spool for this source")
 // directory, and therefore possibly to another filesystem than this spool's.
 var ErrSyncerRoot = errors.New("syncer was probed against a different directory")
 
-// ErrBroken reports a writer that stopped accepting appends because a write
-// failed partway and may have left a fragment behind.
-var ErrBroken = errors.New("writer refuses further appends after a failed write")
+// ErrBroken reports a writer that stopped accepting appends. Either a write
+// failed partway and may have left a fragment behind, or a sync failed and
+// left a framed record that is not durable; the wrapped cause says which,
+// which is the difference between a spool that may hold half a record and one
+// that may hold a whole record it cannot promise.
+var ErrBroken = errors.New("writer refuses further appends after a failed write or sync")
 
 var (
-	errEmptyRecord     = errors.New("record is empty")
-	errEmbeddedNewline = errors.New("record contains a newline, which would frame it as two events")
+	errEmptyRecord       = errors.New("record is empty")
+	errEmbeddedLineBreak = errors.New("record contains a line break, which would frame it as two events")
 )
+
+// lineBreaks are the characters a line-oriented consumer may split a record
+// on: LF and CR, plus the three separators the contract requires a spool
+// serialization to escape, because a Unicode-aware reader treats them as line
+// boundaries too (event-contract.md §Event). A record carrying one raw is a
+// single write here and two records to such a reader.
+var lineBreaks = []string{"\n", "\r", "\u0085", "\u2028", "\u2029"}
 
 // tailScanChunk bounds the backward scan for the last newline. A torn record
 // is at most one event long, so the scan almost always ends in the first
@@ -203,8 +213,10 @@ func (w *Writer) Append(record []byte) error {
 	if len(record) == 0 {
 		return errEmptyRecord
 	}
-	if bytes.IndexByte(record, '\n') >= 0 {
-		return errEmbeddedNewline
+	for _, lineBreak := range lineBreaks {
+		if bytes.Contains(record, []byte(lineBreak)) {
+			return fmt.Errorf("%w: %q", errEmbeddedLineBreak, lineBreak)
+		}
 	}
 
 	// One write call: O_APPEND makes a single write atomic against the file's
