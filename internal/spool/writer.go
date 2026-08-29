@@ -159,25 +159,19 @@ func openEventsFile(root Root, source string, syncer durability.Syncer) (*os.Fil
 	}
 
 	path := root.eventsPath(source)
-	_, err := os.Stat(path)
-	created := errors.Is(err, os.ErrNotExist)
-	if err != nil && !created {
-		return nil, fmt.Errorf("stat %s: %w", path, err)
-	}
-
 	events, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 
-	// A new spool file's directory entry is only durable once the directory
-	// itself is synced; without this a host loss could leave events written
-	// to a file the directory never gained.
-	if created {
-		if err := syncer.SyncDir(dir); err != nil {
-			_ = events.Close()
-			return nil, err
-		}
+	// A spool file's directory entry is only durable once the directory is
+	// synced, and this runs on every open rather than only when this call
+	// created the file: an earlier open may have created it and died before
+	// syncing, and from here that entry is indistinguishable from a durable
+	// one.
+	if err := syncer.SyncDir(dir); err != nil {
+		_ = events.Close()
+		return nil, err
 	}
 
 	return events, nil
@@ -213,6 +207,12 @@ func (w *Writer) Append(record []byte) error {
 	}
 
 	if err := w.syncer.SyncFile(w.events); err != nil {
+		// The record is framed but not durable, and a failed sync does not
+		// stay failed: Linux may report the error once and drop the dirty
+		// page, so a later sync succeeds while this record is already lost.
+		// Accepting more appends would let the caller advance past it.
+		w.broken = fmt.Errorf("%w: %w", ErrBroken, err)
+
 		return fmt.Errorf("sync %s: %w", w.source, err)
 	}
 

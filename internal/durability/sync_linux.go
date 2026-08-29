@@ -45,6 +45,12 @@ var filesystemMagics = map[int64]filesystem{
 	0xc36400:   {name: "ceph", network: true},
 	0xbd00bd0:  {name: "lustre", network: true},
 	0x7461636f: {name: "ocfs2", network: true},
+	// FUSE is how sshfs, rclone, s3fs and their kind reach Linux, and the
+	// magic is the same for every driver, so the subtype cannot be read from
+	// statfs. Refused rather than guessed: sync semantics on a FUSE mount
+	// belong to the driver, which is not a substrate for a durable spool even
+	// when the driver is local.
+	0x65735546: {name: "fuse", network: true},
 	0x1021994:  {name: "tmpfs", volatile: true},
 	0x858458f6: {name: "ramfs", volatile: true},
 	0x9123683e: {name: "btrfs"},

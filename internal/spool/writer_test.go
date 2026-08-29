@@ -212,6 +212,27 @@ func TestAppendRefusesEverythingAfterAFailedWrite(t *testing.T) {
 	}
 }
 
+// A failed sync leaves a framed but undurable record, and on Linux a later
+// sync can succeed after the kernel has dropped the dirty page.
+func TestAppendRefusesEverythingAfterAFailedSync(t *testing.T) {
+	root, syncer := newRoot(t)
+	writer := openWriter(t, root, "pr-comments", syncer)
+
+	// An unprobed syncer refuses every sync, which stands in for a filesystem
+	// that fails one without needing a filesystem that does.
+	writer.syncer = durability.Syncer{}
+	if err := writer.Append([]byte(`{"id":"a"}`)); err == nil {
+		t.Fatal("append reported success without a durable sync")
+	}
+	if err := writer.Append([]byte(`{"id":"b"}`)); !errors.Is(err, ErrBroken) {
+		t.Fatalf("append after a failed sync returned %v, want ErrBroken", err)
+	}
+
+	if got := readSpool(t, root, "pr-comments"); got != "{\"id\":\"a\"}\n" {
+		t.Errorf("spool holds %q; the refused append should not have landed", got)
+	}
+}
+
 func TestOpenRefusesAnUnprobedSyncer(t *testing.T) {
 	root, _ := newRoot(t)
 
