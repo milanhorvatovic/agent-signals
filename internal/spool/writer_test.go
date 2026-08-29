@@ -171,6 +171,47 @@ func truncate(value string) string {
 	return value[:limit] + "..."
 }
 
+// A syncer carries the durability mode and the network-filesystem verdict of
+// the directory it probed; accepting one probed elsewhere would attest a
+// filesystem this spool never touches.
+func TestOpenRejectsASyncerProbedElsewhere(t *testing.T) {
+	root, _ := newRoot(t)
+	elsewhere, err := durability.Probe(t.TempDir())
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	if _, err := Open(root, "pr-comments", elsewhere); !errors.Is(err, ErrSyncerRoot) {
+		t.Fatalf("open with a foreign syncer returned %v, want ErrSyncerRoot", err)
+	}
+}
+
+// A failed write can leave a fragment, and the next append would fuse onto it.
+func TestAppendRefusesEverythingAfterAFailedWrite(t *testing.T) {
+	root, syncer := newRoot(t)
+	writer := openWriter(t, root, "pr-comments", syncer)
+
+	if err := writer.Append([]byte(`{"id":"a"}`)); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	// Closing the descriptor underneath is the cheapest way to make the next
+	// write fail the way a full disk would.
+	if err := writer.events.Close(); err != nil {
+		t.Fatalf("close events file: %v", err)
+	}
+
+	if err := writer.Append([]byte(`{"id":"b"}`)); err == nil {
+		t.Fatal("append succeeded on a closed file")
+	}
+	if err := writer.Append([]byte(`{"id":"c"}`)); !errors.Is(err, ErrBroken) {
+		t.Fatalf("append after a failed write returned %v, want ErrBroken", err)
+	}
+
+	if got := readSpool(t, root, "pr-comments"); got != "{\"id\":\"a\"}\n" {
+		t.Errorf("spool holds %q after the failed appends", got)
+	}
+}
+
 func TestOpenRefusesAnUnprobedSyncer(t *testing.T) {
 	root, _ := newRoot(t)
 

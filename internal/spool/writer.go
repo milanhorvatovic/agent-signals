@@ -22,6 +22,14 @@ import (
 // condition to wait out.
 var ErrLocked = errors.New("another writer holds the spool for this source")
 
+// ErrSyncerRoot reports a syncer whose verified guarantee belongs to another
+// directory, and therefore possibly to another filesystem than this spool's.
+var ErrSyncerRoot = errors.New("syncer was probed against a different directory")
+
+// ErrBroken reports a writer that stopped accepting appends because a write
+// failed partway and may have left a fragment behind.
+var ErrBroken = errors.New("writer refuses further appends after a failed write")
+
 var (
 	errEmptyRecord     = errors.New("record is empty")
 	errEmbeddedNewline = errors.New("record contains a newline, which would frame it as two events")
@@ -58,6 +66,8 @@ type Writer struct {
 	// finalizer closed the descriptor, with nothing to notice.
 	lock   *os.File
 	syncer durability.Syncer
+	// broken records the failure that ended this writer's append stream.
+	broken error
 }
 
 // Open takes the single-writer guard for source, repairs a torn tail left by
@@ -69,10 +79,8 @@ func Open(root Root, source string, syncer durability.Syncer) (*Writer, error) {
 	if err := contract.ValidateSlug("source", source); err != nil {
 		return nil, err
 	}
-	// An unprobed syncer would let the writer open and then fail every
-	// append; the durability guarantee is settled before any state exists.
-	if !syncer.Verified() {
-		return nil, durability.ErrUnprobed
+	if err := checkSyncerRoot(root, syncer); err != nil {
+		return nil, err
 	}
 
 	lock, err := acquireWriterLock(root, source)
@@ -93,6 +101,26 @@ func Open(root Root, source string, syncer durability.Syncer) (*Writer, error) {
 	}
 
 	return writer, nil
+}
+
+// checkSyncerRoot settles the durability guarantee before any state exists.
+// A syncer carries the mode and the network-filesystem verdict of the one
+// directory it probed, so a syncer probed elsewhere would attest a filesystem
+// this spool never writes to.
+func checkSyncerRoot(root Root, syncer durability.Syncer) error {
+	if !syncer.Verified() {
+		return durability.ErrUnprobed
+	}
+
+	absolute, err := filepath.Abs(string(root))
+	if err != nil {
+		return fmt.Errorf("resolve spool root: %w", err)
+	}
+	if absolute != syncer.Dir() {
+		return fmt.Errorf("%w: probed %s, spool root is %s", ErrSyncerRoot, syncer.Dir(), absolute)
+	}
+
+	return nil
 }
 
 func acquireWriterLock(root Root, source string) (*os.File, error) {
@@ -121,6 +149,13 @@ func openEventsFile(root Root, source string, syncer durability.Syncer) (*os.Fil
 	dir := root.eventsDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create events directory: %w", err)
+	}
+	// The events directory's own entry lives in the spool root, so syncing
+	// the directory alone would leave a durable file inside a directory the
+	// root could still lose. Syncing on every open also makes a retry after a
+	// failed sync do the work the first attempt missed.
+	if err := syncer.SyncDir(string(root)); err != nil {
+		return nil, err
 	}
 
 	path := root.eventsPath(source)
@@ -152,6 +187,9 @@ func openEventsFile(root Root, source string, syncer durability.Syncer) (*os.Fil
 // it is durably on disk, which is what lets the caller report the event as
 // accepted (event-contract.md §Spool and cursors).
 func (w *Writer) Append(record []byte) error {
+	if w.broken != nil {
+		return w.broken
+	}
 	if len(record) == 0 {
 		return errEmptyRecord
 	}
@@ -165,6 +203,12 @@ func (w *Writer) Append(record []byte) error {
 	line = append(line, record...)
 	line = append(line, '\n')
 	if _, err := w.events.Write(line); err != nil {
+		// A failed write can still have put bytes in the file — a full disk
+		// truncates the record rather than refusing it — and appending after
+		// a fragment would fuse the two into one corrupt line. Reopening the
+		// spool repairs the tail, so this writer accepts nothing more.
+		w.broken = fmt.Errorf("%w: %w", ErrBroken, err)
+
 		return fmt.Errorf("append to %s: %w", w.source, err)
 	}
 

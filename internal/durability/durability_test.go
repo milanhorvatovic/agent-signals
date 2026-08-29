@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestProbeVerifiesTheHostLossPrimitive(t *testing.T) {
+func TestProbeReportsAVerifiedMode(t *testing.T) {
 	dir := t.TempDir()
 
 	syncer, err := Probe(dir)
@@ -16,11 +16,32 @@ func TestProbeVerifiesTheHostLossPrimitive(t *testing.T) {
 	}
 
 	t.Logf("filesystem %s reports %s durability", syncer.Filesystem(), syncer.Mode())
-	if syncer.Mode() != HostLoss {
-		t.Errorf("local filesystem %s downgraded to %s: the platform adapter cannot verify the full-barrier sync here", syncer.Filesystem(), syncer.Mode())
+	switch syncer.Mode() {
+	case HostLoss, ProcessCrash:
+	default:
+		t.Fatalf("probe returned %q, which is not a verified mode", syncer.Mode())
 	}
+
+	// Both modes are legitimate results, so the general assertion is weak.
+	// These filesystems make it specific: a downgrade on one that supports the
+	// full-barrier sync means the adapter failed to run it, and host-loss
+	// durability on a volatile one is a guarantee that cannot be kept.
+	switch syncer.Filesystem() {
+	case "apfs", "ext4", "xfs", "btrfs", "zfs":
+		if syncer.Mode() != HostLoss {
+			t.Errorf("%s downgraded to %s despite supporting the full-barrier sync", syncer.Filesystem(), syncer.Mode())
+		}
+	case "tmpfs", "ramfs":
+		if syncer.Mode() != ProcessCrash {
+			t.Errorf("volatile filesystem %s advertised %s", syncer.Filesystem(), syncer.Mode())
+		}
+	}
+
 	if syncer.Filesystem() == "" {
 		t.Error("filesystem name is empty; diagnostics cannot name the volume")
+	}
+	if syncer.Dir() != dir {
+		t.Errorf("syncer reports %s as the probed directory, want %s", syncer.Dir(), dir)
 	}
 }
 

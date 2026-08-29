@@ -15,9 +15,13 @@ func syncFileData(file *os.File) error {
 }
 
 // inspectFilesystem maps the statfs magic number, since Linux reports the
-// filesystem type as a number rather than a name. An unrecognised type is
-// named by its magic and treated as local: only the types listed here are
-// known to be network filesystems.
+// filesystem type as a number rather than a name and offers no local/remote
+// flag to ask instead. An unrecognised type is named by its magic and treated
+// as local, which is a deliberate trade: refusing every filesystem this table
+// has not heard of would reject new local ones as readily as remote ones,
+// while the exclusion the contract needs is documented rather than enforced.
+// Types known to be network or volatile are listed exhaustively enough to
+// catch what a developer machine actually mounts.
 func inspectFilesystem(dir string) (filesystem, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err != nil {
@@ -36,10 +40,16 @@ var filesystemMagics = map[int64]filesystem{
 	0xff534d42: {name: "cifs", network: true},
 	0x517b:     {name: "smbfs", network: true},
 	0x5346414f: {name: "afs", network: true},
+	0x6b414653: {name: "afs", network: true},
+	0x1021997:  {name: "9p", network: true},
+	0xc36400:   {name: "ceph", network: true},
+	0xbd00bd0:  {name: "lustre", network: true},
+	0x7461636f: {name: "ocfs2", network: true},
+	0x1021994:  {name: "tmpfs", volatile: true},
+	0x858458f6: {name: "ramfs", volatile: true},
 	0x9123683e: {name: "btrfs"},
 	0x794c7630: {name: "overlay"},
 	0xef53:     {name: "ext4"},
 	0x58465342: {name: "xfs"},
-	0x1021994:  {name: "tmpfs"},
 	0x2fc12fc1: {name: "zfs"},
 }

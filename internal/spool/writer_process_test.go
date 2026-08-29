@@ -34,7 +34,8 @@ func holdWriter(root Root, source string) {
 	if err != nil {
 		os.Exit(1)
 	}
-	if _, err := Open(root, source, syncer); err != nil {
+	writer, err := Open(root, source, syncer)
+	if err != nil {
 		os.Exit(1)
 	}
 
@@ -42,8 +43,11 @@ func holdWriter(root Root, source string) {
 		os.Exit(1)
 	}
 	// The parent closes our stdin to order a clean release; being killed
-	// instead is the case the test is really after.
+	// instead is the case the test is really after. Closing the writer here
+	// rather than dropping it also keeps the lock descriptor reachable for as
+	// long as this process claims to hold the guard.
 	_, _ = io.Copy(io.Discard, os.Stdin)
+	_ = writer.Close()
 	os.Exit(0)
 }
 

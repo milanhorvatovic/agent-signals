@@ -14,16 +14,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"syscall"
 )
 
 // filesystem is what the platform can say about the volume holding the spool:
-// a name for diagnostics, and whether it is a network filesystem, which the
-// contract excludes because O_APPEND races there and locking is emulated.
+// a name for diagnostics, whether it is a network filesystem, which the
+// contract excludes because O_APPEND races there and locking is emulated, and
+// whether its contents are volatile, which caps the guarantee it can give
+// however well its sync call reports success.
 type filesystem struct {
-	name    string
-	network bool
+	name     string
+	network  bool
+	volatile bool
 }
 
 // Mode is the durability guarantee a probed directory can honour.
@@ -52,6 +56,7 @@ var ErrUnprobed = errors.New("syncer was not created by Probe")
 // Syncer performs the spool's durable writes at the strongest guarantee its
 // directory was verified to support. Create one with Probe.
 type Syncer struct {
+	dir        string
 	mode       Mode
 	filesystem string
 }
@@ -60,26 +65,31 @@ type Syncer struct {
 // unsupported filesystem is discovered at startup rather than at the first
 // event. dir must already exist.
 func Probe(dir string) (Syncer, error) {
-	volume, err := inspectFilesystem(dir)
+	absolute, err := filepath.Abs(dir)
 	if err != nil {
-		return Syncer{}, fmt.Errorf("inspect %s: %w", dir, err)
-	}
-	if volume.network {
-		return Syncer{}, fmt.Errorf("%s is on %s: %w", dir, volume.name, ErrNetworkFilesystem)
+		return Syncer{}, fmt.Errorf("resolve %s: %w", dir, err)
 	}
 
-	mode, err := probeMode(dir)
+	volume, err := inspectFilesystem(absolute)
+	if err != nil {
+		return Syncer{}, fmt.Errorf("inspect %s: %w", absolute, err)
+	}
+	if volume.network {
+		return Syncer{}, fmt.Errorf("%s is on %s: %w", absolute, volume.name, ErrNetworkFilesystem)
+	}
+
+	mode, err := probeMode(absolute, volume)
 	if err != nil {
 		return Syncer{}, err
 	}
 
-	return Syncer{mode: mode, filesystem: volume.name}, nil
+	return Syncer{dir: absolute, mode: mode, filesystem: volume.name}, nil
 }
 
 // probeMode answers the question the platform cannot be asked directly: it
 // runs the full-barrier sync on a real file in the target directory and reads
 // the refusal, if any, from the result.
-func probeMode(dir string) (Mode, error) {
+func probeMode(dir string, volume filesystem) (Mode, error) {
 	file, err := os.CreateTemp(dir, ".durability-probe-*")
 	if err != nil {
 		return "", fmt.Errorf("create durability probe in %s: %w", dir, err)
@@ -93,14 +103,31 @@ func probeMode(dir string) (Mode, error) {
 		return "", fmt.Errorf("write durability probe: %w", err)
 	}
 
+	// A volatile filesystem holds the write in memory, so the full-barrier
+	// sync would report success and still lose everything on host loss. Its
+	// ceiling is the weaker guarantee no matter what the primitive answers.
+	if volume.volatile {
+		return verifyProcessCrash(file, dir)
+	}
+
 	switch err := syncFileData(file); {
 	case err == nil:
 		return HostLoss, nil
 	case isUnsupported(err):
-		return ProcessCrash, nil
+		return verifyProcessCrash(file, dir)
 	default:
 		return "", fmt.Errorf("durability probe in %s: %w", dir, err)
 	}
+}
+
+// verifyProcessCrash runs the weaker primitive rather than assuming it works.
+// Every mode a Syncer reports is one it has actually executed here.
+func verifyProcessCrash(file *os.File, dir string) (Mode, error) {
+	if err := fsync(file); err != nil {
+		return "", fmt.Errorf("ordinary sync probe in %s: %w", dir, err)
+	}
+
+	return ProcessCrash, nil
 }
 
 func isUnsupported(err error) bool {
@@ -112,6 +139,10 @@ func isUnsupported(err error) bool {
 
 // Mode reports the guarantee this syncer verified.
 func (s Syncer) Mode() Mode { return s.mode }
+
+// Dir reports the directory this syncer was probed against. Durability was
+// verified there and on no other filesystem.
+func (s Syncer) Dir() string { return s.dir }
 
 // Verified reports whether this syncer came from Probe. The zero Syncer
 // carries no verified guarantee and refuses every sync.
