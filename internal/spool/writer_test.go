@@ -207,8 +207,8 @@ func TestAppendRefusesEverythingAfterAFailedWrite(t *testing.T) {
 		t.Fatalf("close events file: %v", err)
 	}
 
-	if err := writer.Append([]byte(`{"id":"b"}`)); err == nil {
-		t.Fatal("append succeeded on a closed file")
+	if err := writer.Append([]byte(`{"id":"b"}`)); !errors.Is(err, ErrBroken) {
+		t.Fatalf("the failing append returned %v, want ErrBroken", err)
 	}
 	if err := writer.Append([]byte(`{"id":"c"}`)); !errors.Is(err, ErrBroken) {
 		t.Fatalf("append after a failed write returned %v, want ErrBroken", err)
@@ -228,8 +228,8 @@ func TestAppendRefusesEverythingAfterAFailedSync(t *testing.T) {
 	// An unprobed syncer refuses every sync, which stands in for a filesystem
 	// that fails one without needing a filesystem that does.
 	writer.syncer = durability.Syncer{}
-	if err := writer.Append([]byte(`{"id":"a"}`)); err == nil {
-		t.Fatal("append reported success without a durable sync")
+	if err := writer.Append([]byte(`{"id":"a"}`)); !errors.Is(err, ErrBroken) {
+		t.Fatalf("the unsynced append returned %v, want ErrBroken", err)
 	}
 	if err := writer.Append([]byte(`{"id":"b"}`)); !errors.Is(err, ErrBroken) {
 		t.Fatalf("append after a failed sync returned %v, want ErrBroken", err)

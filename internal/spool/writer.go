@@ -229,9 +229,9 @@ func (w *Writer) Append(record []byte) error {
 		// truncates the record rather than refusing it — and appending after
 		// a fragment would fuse the two into one corrupt line. Reopening the
 		// spool repairs the tail, so this writer accepts nothing more.
-		w.broken = fmt.Errorf("%w: %w", ErrBroken, err)
+		w.broken = fmt.Errorf("%w: append to %s: %w", ErrBroken, w.source, err)
 
-		return fmt.Errorf("append to %s: %w", w.source, err)
+		return w.broken
 	}
 
 	if err := w.syncer.SyncFile(w.events); err != nil {
@@ -239,9 +239,9 @@ func (w *Writer) Append(record []byte) error {
 		// stay failed: Linux may report the error once and drop the dirty
 		// page, so a later sync succeeds while this record is already lost.
 		// Accepting more appends would let the caller advance past it.
-		w.broken = fmt.Errorf("%w: %w", ErrBroken, err)
+		w.broken = fmt.Errorf("%w: sync %s: %w", ErrBroken, w.source, err)
 
-		return fmt.Errorf("sync %s: %w", w.source, err)
+		return w.broken
 	}
 
 	return nil

@@ -167,11 +167,30 @@ func probeMode(dir string, volume filesystem) (Mode, error) {
 
 	switch err := syncFileData(file); {
 	case err == nil:
-		return HostLoss, nil
 	case isUnsupported(err):
 		return verifyProcessCrash(file, dir)
 	default:
 		return "", fmt.Errorf("durability probe in %s: %w", dir, err)
+	}
+
+	// Metadata commits stand alone: a new spool file's directory entry and,
+	// later, a cursor rename have no file-data barrier behind them to carry
+	// them to the platter. The directory primitive is therefore verified too,
+	// and when only one of the two is available the syncer reports the weaker
+	// mode for both rather than a guarantee that holds for half its calls.
+	handle, err := os.Open(dir)
+	if err != nil {
+		return "", fmt.Errorf("open %s for the directory probe: %w", dir, err)
+	}
+	defer func() { _ = handle.Close() }()
+
+	switch err := syncFileData(handle); {
+	case err == nil:
+		return HostLoss, nil
+	case isUnsupported(err):
+		return verifyProcessCrash(file, dir)
+	default:
+		return "", fmt.Errorf("directory durability probe in %s: %w", dir, err)
 	}
 }
 
@@ -209,21 +228,19 @@ func (s Syncer) Filesystem() string { return s.filesystem }
 // SyncFile flushes the file's data at the verified guarantee. It returns only
 // after the platform reports the write is on stable storage.
 func (s Syncer) SyncFile(file *os.File) error {
-	switch s.mode {
-	case HostLoss:
-		return syncFileData(file)
-	case ProcessCrash:
-		return fsync(file)
-	default:
+	if !s.Verified() {
 		return ErrUnprobed
 	}
+
+	return s.sync(file)
 }
 
 // SyncDir flushes a directory's metadata, making a file created or renamed in
-// it durable. Directory metadata uses the ordinary directory sync on both
-// platforms; the full-barrier primitive covers file data.
+// it durable. It uses the same primitive as SyncFile: a metadata commit that
+// nothing else follows would otherwise sit in the drive's cache while being
+// reported as durable.
 func (s Syncer) SyncDir(dir string) error {
-	if s.mode == "" {
+	if !s.Verified() {
 		return ErrUnprobed
 	}
 
@@ -233,11 +250,21 @@ func (s Syncer) SyncDir(dir string) error {
 	}
 	defer func() { _ = handle.Close() }()
 
-	if err := fsync(handle); err != nil {
+	if err := s.sync(handle); err != nil {
 		return fmt.Errorf("sync %s: %w", dir, err)
 	}
 
 	return nil
+}
+
+// sync applies the verified primitive to an open file or directory. Both were
+// exercised at probe time, so the mode holds for either.
+func (s Syncer) sync(file *os.File) error {
+	if s.mode == HostLoss {
+		return syncFileData(file)
+	}
+
+	return fsync(file)
 }
 
 func fsync(file *os.File) error {

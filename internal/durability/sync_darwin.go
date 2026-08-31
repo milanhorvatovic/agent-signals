@@ -8,7 +8,8 @@ import (
 
 // syncFileData issues F_FULLFSYNC, the only macOS primitive that flushes the
 // drive's own write cache; ordinary fsync returns as soon as the data reaches
-// that cache and does not survive host loss. Unlike the runtime's file sync,
+// that cache and does not survive host loss. It applies to a directory handle
+// as much as a file one, since the barrier is issued to the device. Unlike the runtime's file sync,
 // a refusal is returned rather than retried as a weaker fsync, so Probe can
 // report the downgrade instead of hiding it.
 func syncFileData(file *os.File) error {
