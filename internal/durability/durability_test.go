@@ -77,6 +77,21 @@ func TestVerifyFileRejectsAnotherFilesystem(t *testing.T) {
 	}
 }
 
+// The directory handle is opened inside SyncDir, so no caller can verify it
+// first; the check has to live there.
+func TestSyncDirRejectsAnotherFilesystem(t *testing.T) {
+	syncer, err := Probe(t.TempDir())
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	// The device tree is a filesystem of its own on both platforms, and never
+	// the one holding a temporary directory.
+	if err := syncer.SyncDir("/dev"); !errors.Is(err, ErrForeignFilesystem) {
+		t.Errorf("SyncDir on /dev returned %v, want ErrForeignFilesystem", err)
+	}
+}
+
 func TestProbeLeavesNothingBehind(t *testing.T) {
 	dir := t.TempDir()
 

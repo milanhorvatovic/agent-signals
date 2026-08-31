@@ -40,10 +40,13 @@ const (
 	// file sync is available on this filesystem and was verified at probe
 	// time. This is the contract's durability target.
 	HostLoss Mode = "host-loss"
-	// ProcessCrash survives process death only. The filesystem refused the
-	// full-barrier primitive, so writes reported as durable may still be
-	// sitting in a drive cache. Callers advertise this weaker guarantee
-	// explicitly rather than claiming the stronger one.
+	// ProcessCrash survives process death only, for either of two reasons:
+	// the filesystem refused the full-barrier primitive, so a write reported
+	// as durable may still sit in a drive cache, or the storage is volatile
+	// or of unverifiable persistence, where the primitive succeeds and the
+	// data is lost with the host anyway. Callers advertise this weaker
+	// guarantee explicitly rather than claiming the stronger one, and cannot
+	// read a refused primitive from the mode alone.
 	ProcessCrash Mode = "process-crash"
 )
 
@@ -98,10 +101,11 @@ func Probe(dir string) (Syncer, error) {
 	return Syncer{dir: absolute, device: device, mode: mode, filesystem: volume.name}, nil
 }
 
-// VerifyFile reports whether file sits on the filesystem this syncer probed.
-// A path can leave that filesystem without leaving the directory — a symlinked
-// component, a nested mount — and the guarantee this syncer advertises was
-// measured on one filesystem only.
+// VerifyFile reports whether an open handle — a file or a directory, both of
+// which arrive here as *os.File — sits on the filesystem this syncer probed.
+// A path can leave that filesystem without leaving the directory, through a
+// symlinked component or a nested mount, and the guarantee this syncer
+// advertises was measured on one filesystem only.
 func (s Syncer) VerifyFile(file *os.File) error {
 	if !s.Verified() {
 		return ErrUnprobed
@@ -232,8 +236,10 @@ func (s Syncer) Verified() bool { return s.mode != "" }
 // Filesystem names the volume holding the spool, for diagnostics.
 func (s Syncer) Filesystem() string { return s.filesystem }
 
-// SyncFile flushes the file's data at the verified guarantee. It returns only
-// after the platform reports the write is on stable storage.
+// SyncFile flushes the file's data with the primitive this syncer verified,
+// returning once the platform reports that primitive complete. What that is
+// worth is the syncer's mode: stable storage under HostLoss, and no more than
+// survival of this process under ProcessCrash.
 func (s Syncer) SyncFile(file *os.File) error {
 	if !s.Verified() {
 		return ErrUnprobed
@@ -256,6 +262,13 @@ func (s Syncer) SyncDir(dir string) error {
 		return err
 	}
 	defer func() { _ = handle.Close() }()
+
+	// A caller can verify a file it opened itself, but not this handle, and a
+	// symlinked or separately mounted directory would otherwise be synced with
+	// a primitive verified on another filesystem and reported durable.
+	if err := s.VerifyFile(handle); err != nil {
+		return err
+	}
 
 	if err := s.sync(handle); err != nil {
 		return fmt.Errorf("sync %s: %w", dir, err)
