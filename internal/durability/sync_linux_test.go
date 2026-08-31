@@ -9,12 +9,13 @@ import "testing"
 // pins the signature, so a return to a widened signed lookup fails to compile.
 func TestHighBitMagicsClassifyThroughANarrowedValue(t *testing.T) {
 	cases := map[string]struct {
-		magic   uint32
-		network bool
+		magic    uint32
+		network  bool
+		volatile bool
 	}{
 		"cifs":  {magic: 0xff534d42, network: true},
 		"btrfs": {magic: 0x9123683e},
-		"ramfs": {magic: 0x858458f6},
+		"ramfs": {magic: 0x858458f6, volatile: true},
 	}
 
 	for name, testCase := range cases {
@@ -28,5 +29,21 @@ func TestHighBitMagicsClassifyThroughANarrowedValue(t *testing.T) {
 		if got.network != testCase.network {
 			t.Errorf("%s classified network=%v, want %v", name, got.network, testCase.network)
 		}
+		if got.volatile != testCase.volatile {
+			t.Errorf("%s classified volatile=%v, want %v", name, got.volatile, testCase.volatile)
+		}
+	}
+}
+
+// An overlay mount can be backed by tmpfs and statfs cannot see through to the
+// layers, so the mode it can honestly advertise is the weaker one.
+func TestOverlayIsCappedAtTheWeakerMode(t *testing.T) {
+	overlay := filesystemForMagic(0x794c7630)
+
+	if overlay.name != "overlay" {
+		t.Fatalf("overlay magic resolved to %q", overlay.name)
+	}
+	if !overlay.volatile {
+		t.Error("overlay is trusted for host-loss durability despite an unknown upper layer")
 	}
 }

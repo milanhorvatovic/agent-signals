@@ -62,8 +62,12 @@ var filesystemMagics = map[uint32]filesystem{
 	0x65735546: {name: "fuse", network: true},
 	0x1021994:  {name: "tmpfs", volatile: true},
 	0x858458f6: {name: "ramfs", volatile: true},
+	// An overlay mount says nothing about what backs it: the upper layer may
+	// be tmpfs, and statfs cannot see through to it. Capped at the weaker mode
+	// because the persistence of what is written here cannot be established
+	// from the mount alone.
+	0x794c7630: {name: "overlay", volatile: true},
 	0x9123683e: {name: "btrfs"},
-	0x794c7630: {name: "overlay"},
 	0xef53:     {name: "ext4"},
 	0x58465342: {name: "xfs"},
 	0x2fc12fc1: {name: "zfs"},

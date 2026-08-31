@@ -23,7 +23,9 @@ import (
 // a name for diagnostics, whether it is a network filesystem, which the
 // contract excludes because O_APPEND races there and locking is emulated, and
 // whether its contents are volatile, which caps the guarantee it can give
-// however well its sync call reports success.
+// however well its sync call reports success. Volatile covers storage that is
+// known to live in memory and storage whose persistence cannot be established,
+// since both make host-loss durability a claim rather than a fact.
 type filesystem struct {
 	name     string
 	network  bool
@@ -158,47 +160,52 @@ func probeMode(dir string, volume filesystem) (Mode, error) {
 		return "", fmt.Errorf("write durability probe: %w", err)
 	}
 
-	// A volatile filesystem holds the write in memory, so the full-barrier
-	// sync would report success and still lose everything on host loss. Its
-	// ceiling is the weaker guarantee no matter what the primitive answers.
-	if volume.volatile {
-		return verifyProcessCrash(file, dir)
-	}
-
-	switch err := syncFileData(file); {
-	case err == nil:
-	case isUnsupported(err):
-		return verifyProcessCrash(file, dir)
-	default:
-		return "", fmt.Errorf("durability probe in %s: %w", dir, err)
-	}
-
 	// Metadata commits stand alone: a new spool file's directory entry and,
 	// later, a cursor rename have no file-data barrier behind them to carry
-	// them to the platter. The directory primitive is therefore verified too,
-	// and when only one of the two is available the syncer reports the weaker
-	// mode for both rather than a guarantee that holds for half its calls.
+	// them to the platter. Every mode is therefore exercised on a directory
+	// as well as a file, and when only one of the two works the syncer reports
+	// the weaker mode for both rather than a guarantee that holds for half its
+	// calls.
 	handle, err := os.Open(dir)
 	if err != nil {
 		return "", fmt.Errorf("open %s for the directory probe: %w", dir, err)
 	}
 	defer func() { _ = handle.Close() }()
 
+	// A volatile filesystem holds the write in memory, so the full-barrier
+	// sync would report success and still lose everything on host loss. Its
+	// ceiling is the weaker guarantee no matter what the primitive answers.
+	if volume.volatile {
+		return verifyProcessCrash(file, handle, dir)
+	}
+
+	switch err := syncFileData(file); {
+	case err == nil:
+	case isUnsupported(err):
+		return verifyProcessCrash(file, handle, dir)
+	default:
+		return "", fmt.Errorf("durability probe in %s: %w", dir, err)
+	}
+
 	switch err := syncFileData(handle); {
 	case err == nil:
 		return HostLoss, nil
 	case isUnsupported(err):
-		return verifyProcessCrash(file, dir)
+		return verifyProcessCrash(file, handle, dir)
 	default:
 		return "", fmt.Errorf("directory durability probe in %s: %w", dir, err)
 	}
 }
 
-// verifyProcessCrash runs the weaker primitive rather than assuming it works.
-// Every mode a Syncer reports is one it has actually executed here.
-func verifyProcessCrash(file *os.File, dir string) (Mode, error) {
+// verifyProcessCrash runs the weaker primitive rather than assuming it works,
+// on both the file and the directory, because a Syncer in this mode uses it
+// for both. Every mode a Syncer reports is one it has actually executed here.
+func verifyProcessCrash(file, handle *os.File, dir string) (Mode, error) {
 	if err := fsync(file); err != nil {
 		return "", fmt.Errorf("ordinary sync probe in %s: %w", dir, err)
+	}
+	if err := fsync(handle); err != nil {
+		return "", fmt.Errorf("ordinary directory sync probe in %s: %w", dir, err)
 	}
 
 	return ProcessCrash, nil
