@@ -14,6 +14,7 @@ func TestHighBitMagicsClassifyThroughANarrowedValue(t *testing.T) {
 		volatile bool
 	}{
 		"cifs":  {magic: 0xff534d42, network: true},
+		"smb2":  {magic: 0xfe534d42, network: true},
 		"btrfs": {magic: 0x9123683e},
 		"ramfs": {magic: 0x858458f6, volatile: true},
 	}

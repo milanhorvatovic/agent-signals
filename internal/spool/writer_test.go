@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/milanhorvatovic/agent-signals/internal/durability"
@@ -284,6 +285,32 @@ func TestOpenRejectsSymlinkedState(t *testing.T) {
 				t.Fatalf("opened a spool whose %s is a symlink", name)
 			}
 			t.Logf("%s symlink refused: %v", name, err)
+		})
+	}
+}
+
+// A FIFO opens, survives the device check, and then hangs the append that
+// fills its buffer, so the state paths are held to regular files.
+func TestOpenRejectsNonRegularState(t *testing.T) {
+	cases := map[string]func(root Root) (string, string){
+		"spool file": func(root Root) (string, string) { return root.eventsDir(), root.eventsPath("pr-comments") },
+		"lock file":  func(root Root) (string, string) { return root.writerLockDir(), root.writerLockPath("pr-comments") },
+	}
+
+	for name, pathsOf := range cases {
+		t.Run(name, func(t *testing.T) {
+			root, syncer := newRoot(t)
+			dir, path := pathsOf(root)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("create state dir: %v", err)
+			}
+			if err := syscall.Mkfifo(path, 0o644); err != nil {
+				t.Fatalf("create fifo: %v", err)
+			}
+
+			if _, err := Open(root, "pr-comments", syncer); !errors.Is(err, ErrNotRegularFile) {
+				t.Fatalf("opened a spool whose %s is a fifo: %v", name, err)
+			}
 		})
 	}
 }

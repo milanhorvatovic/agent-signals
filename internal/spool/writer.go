@@ -26,6 +26,11 @@ var ErrLocked = errors.New("another writer holds the spool for this source")
 // directory, and therefore possibly to another filesystem than this spool's.
 var ErrSyncerRoot = errors.New("syncer was probed against a different directory")
 
+// ErrNotRegularFile reports spool state that is not a regular file. A FIFO or
+// a device at one of these paths opens and passes every other check, then
+// blocks or discards the appends it receives.
+var ErrNotRegularFile = errors.New("spool state is not a regular file")
+
 // ErrBroken reports a writer that stopped accepting appends. Either a write
 // failed partway and may have left a fragment behind, or a sync failed and
 // left a framed record that is not durable; the wrapped cause says which,
@@ -147,7 +152,7 @@ func acquireWriterLock(root Root, source string, syncer durability.Syncer) (*os.
 	if err != nil {
 		return nil, err
 	}
-	if err := syncer.VerifyFile(lock); err != nil {
+	if err := verifyState(lock, syncer); err != nil {
 		_ = lock.Close()
 		return nil, err
 	}
@@ -161,6 +166,22 @@ func acquireWriterLock(root Root, source string, syncer durability.Syncer) (*os.
 	}
 
 	return lock, nil
+}
+
+// verifyState holds an opened state file to what the writer assumes of it: a
+// regular file on the filesystem whose durability and locking were verified.
+// A FIFO left at either path opens, satisfies the device check, and then hangs
+// the append that fills its buffer.
+func verifyState(file *os.File, syncer durability.Syncer) error {
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", file.Name(), err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s is %s", ErrNotRegularFile, file.Name(), info.Mode().Type())
+	}
+
+	return syncer.VerifyFile(file)
 }
 
 func openEventsFile(root Root, source string, syncer durability.Syncer) (*os.File, error) {
@@ -185,7 +206,7 @@ func openEventsFile(root Root, source string, syncer durability.Syncer) (*os.Fil
 	if err != nil {
 		return nil, err
 	}
-	if err := syncer.VerifyFile(events); err != nil {
+	if err := verifyState(events, syncer); err != nil {
 		_ = events.Close()
 		return nil, err
 	}

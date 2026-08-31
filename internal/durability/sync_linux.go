@@ -47,6 +47,7 @@ func filesystemForMagic(magic uint32) filesystem {
 var filesystemMagics = map[uint32]filesystem{
 	0x6969:     {name: "nfs", network: true},
 	0xff534d42: {name: "cifs", network: true},
+	0xfe534d42: {name: "smb2", network: true},
 	0x517b:     {name: "smbfs", network: true},
 	0x5346414f: {name: "afs", network: true},
 	0x6b414653: {name: "afs", network: true},
