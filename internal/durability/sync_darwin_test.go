@@ -21,8 +21,11 @@ func TestFullFsyncSucceedsOnARegularFile(t *testing.T) {
 }
 
 // The runtime's own sync answers a refusal by retrying as an ordinary fsync,
-// which would report host-loss durability the filesystem never gave. This
-// adapter must return the refusal so Probe can downgrade the advertised mode.
+// which would report host-loss durability the filesystem never gave; this
+// adapter returns the refusal instead. A pipe is the portable way to make the
+// kernel refuse, having no vnode to flush, and it refuses with EBADF rather
+// than the ENOTSUP an unsupporting filesystem gives — so what this pins is
+// that the error surfaces at all, not which mode Probe would report from it.
 func TestFullFsyncReportsARefusal(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {

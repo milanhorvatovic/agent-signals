@@ -214,8 +214,9 @@ func TestAppendRefusesEverythingAfterAFailedWrite(t *testing.T) {
 		t.Fatalf("append after a failed write returned %v, want ErrBroken", err)
 	}
 
-	if got := readSpool(t, root, "pr-comments"); got != "{\"id\":\"a\"}\n" {
-		t.Errorf("spool holds %q after the failed appends", got)
+	const want = "{\"id\":\"a\"}\n"
+	if got := readSpool(t, root, "pr-comments"); got != want {
+		t.Errorf("spool holds %q, want %q: the refused appends should not have landed", got, want)
 	}
 }
 
@@ -235,8 +236,9 @@ func TestAppendRefusesEverythingAfterAFailedSync(t *testing.T) {
 		t.Fatalf("append after a failed sync returned %v, want ErrBroken", err)
 	}
 
-	if got := readSpool(t, root, "pr-comments"); got != "{\"id\":\"a\"}\n" {
-		t.Errorf("spool holds %q; the refused append should not have landed", got)
+	const want = "{\"id\":\"a\"}\n"
+	if got := readSpool(t, root, "pr-comments"); got != want {
+		t.Errorf("spool holds %q, want %q: the refused append should not have landed", got, want)
 	}
 }
 

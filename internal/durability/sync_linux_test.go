@@ -24,7 +24,7 @@ func TestHighBitMagicsClassifyThroughANarrowedValue(t *testing.T) {
 		got := filesystemForMagic(uint32(signed))
 
 		if got.name != name {
-			t.Errorf("%s magic resolved to %q", name, got.name)
+			t.Errorf("magic %#x resolved to %q, want %q", testCase.magic, got.name, name)
 		}
 		if got.network != testCase.network {
 			t.Errorf("%s classified network=%v, want %v", name, got.network, testCase.network)
@@ -41,7 +41,7 @@ func TestOverlayIsCappedAtTheWeakerMode(t *testing.T) {
 	overlay := filesystemForMagic(0x794c7630)
 
 	if overlay.name != "overlay" {
-		t.Fatalf("overlay magic resolved to %q", overlay.name)
+		t.Fatalf("overlay magic resolved to %q, want \"overlay\"", overlay.name)
 	}
 	if !overlay.volatile {
 		t.Error("overlay is trusted for host-loss durability despite an unknown upper layer")
