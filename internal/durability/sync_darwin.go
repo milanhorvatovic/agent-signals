@@ -47,9 +47,24 @@ func inspectFilesystem(dir string) (filesystem, error) {
 	local := stat.Flags&mntLocal != 0
 
 	return filesystem{
-		name:    string(name),
-		network: !local || networkFilesystems[string(name)],
+		name:     string(name),
+		network:  !local || networkFilesystems[string(name)],
+		volatile: volatileFilesystems[string(name)],
 	}, nil
+}
+
+// volatileFilesystems are the types macOS names as living in memory. The list
+// closes only the case the kernel is willing to describe: a filesystem on a
+// RAM-backed device — a disk image attached with ram:// and formatted APFS or
+// HFS+ — reports the same type and the same local-mount flag as one on a
+// physical disk, and statfs exposes nothing that separates them. Seeing
+// through that would mean asking DiskArbitration, a framework dependency this
+// package does without, so the host-loss claim assumes persistent backing and
+// says so where the mode is defined.
+var volatileFilesystems = map[string]bool{
+	"tmpfs": true,
+	"ramfs": true,
+	"devfs": true,
 }
 
 var networkFilesystems = map[string]bool{

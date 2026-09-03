@@ -38,7 +38,11 @@ type Mode string
 const (
 	// HostLoss survives sudden host power loss: the platform's full-barrier
 	// file sync is available on this filesystem and was verified at probe
-	// time. This is the contract's durability target.
+	// time. This is the contract's durability target. It assumes the volume is
+	// backed by persistent storage, which the platforms describe unevenly: an
+	// in-memory filesystem names itself and is capped, but a filesystem on a
+	// RAM-backed device reports as an ordinary local one and no probe here can
+	// see through that.
 	HostLoss Mode = "host-loss"
 	// ProcessCrash survives process death only, for either of two reasons:
 	// the filesystem refused the full-barrier primitive, so a write reported
@@ -154,21 +158,19 @@ func deviceOfInfo(info os.FileInfo) (uint64, error) {
 }
 
 // probeMode answers the question the platform cannot be asked directly: it
-// runs the full-barrier sync on a real file in the target directory and reads
-// the refusal, if any, from the result.
+// runs the candidate primitives against a real file and a real directory in
+// the target directory and reads the refusal, if any, from the result.
 func probeMode(dir string, volume filesystem) (Mode, error) {
 	file, err := os.CreateTemp(dir, ".durability-probe-*")
 	if err != nil {
 		return "", fmt.Errorf("create durability probe in %s: %w", dir, err)
 	}
+	// Best effort, for the paths that fail before the durable removal below.
+	// Both calls are no-ops once that has run.
 	defer func() {
 		_ = file.Close()
 		_ = os.Remove(file.Name())
 	}()
-
-	if _, err := file.Write([]byte{'\n'}); err != nil {
-		return "", fmt.Errorf("write durability probe: %w", err)
-	}
 
 	// Metadata commits stand alone: a new spool file's directory entry and,
 	// later, a cursor rename have no file-data barrier behind them to carry
@@ -181,6 +183,19 @@ func probeMode(dir string, volume filesystem) (Mode, error) {
 		return "", fmt.Errorf("open %s for the directory probe: %w", dir, err)
 	}
 	defer func() { _ = handle.Close() }()
+
+	mode, err := measureMode(file, handle, dir, volume)
+	if err != nil {
+		return "", err
+	}
+
+	return mode, commitProbeRemoval(file, handle, mode)
+}
+
+func measureMode(file, handle *os.File, dir string, volume filesystem) (Mode, error) {
+	if _, err := file.Write([]byte{'\n'}); err != nil {
+		return "", fmt.Errorf("write durability probe: %w", err)
+	}
 
 	// A volatile filesystem holds the write in memory, so the full-barrier
 	// sync would report success and still lose everything on host loss. Its
@@ -205,6 +220,26 @@ func probeMode(dir string, volume filesystem) (Mode, error) {
 	default:
 		return "", fmt.Errorf("directory durability probe in %s: %w", dir, err)
 	}
+}
+
+// commitProbeRemoval unlinks the probe file and commits the unlink, because an
+// unlink reaches the disk no more readily than the file did: without the
+// directory sync a host loss restores the probe, and a run of crashes leaves a
+// drift of them in the spool root. Failures surface rather than leaving a
+// caller with a Syncer whose own state was not cleaned up.
+func commitProbeRemoval(file, handle *os.File, mode Mode) error {
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close durability probe: %w", err)
+	}
+	if err := os.Remove(file.Name()); err != nil {
+		return fmt.Errorf("remove durability probe: %w", err)
+	}
+
+	if err := syncAt(mode, handle); err != nil {
+		return fmt.Errorf("commit the removal of the durability probe: %w", err)
+	}
+
+	return nil
 }
 
 // verifyProcessCrash runs the weaker primitive rather than assuming it works,
@@ -285,8 +320,12 @@ func (s Syncer) SyncDir(dir string) error {
 
 // sync applies the verified primitive to an open file or directory. Both were
 // exercised at probe time, so the mode holds for either.
-func (s Syncer) sync(file *os.File) error {
-	if s.mode == HostLoss {
+func (s Syncer) sync(file *os.File) error { return syncAt(s.mode, file) }
+
+// syncAt is sync for callers that hold a mode but not yet a Syncer — the probe
+// itself, which must commit its own cleanup at the mode it just measured.
+func syncAt(mode Mode, file *os.File) error {
+	if mode == HostLoss {
 		return syncFileData(file)
 	}
 
