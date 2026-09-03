@@ -54,6 +54,12 @@ const (
 // emulated locking make network filesystems unsupported, not merely weaker.
 var ErrNetworkFilesystem = errors.New("spool state on a network filesystem is unsupported")
 
+// ErrUnknownFilesystem rejects a filesystem the mount table names but this
+// package cannot classify. A name the kernel supplies and no list here knows
+// is genuinely unusual, and the spool cannot state what append or locking
+// semantics it would get there.
+var ErrUnknownFilesystem = errors.New("filesystem type is not recognised")
+
 // ErrUnprobed guards the zero Syncer, whose empty mode would otherwise
 // silently degrade every sync to the weaker primitive.
 var ErrUnprobed = errors.New("syncer was not created by Probe")

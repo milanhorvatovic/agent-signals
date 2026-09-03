@@ -1,6 +1,7 @@
 package durability
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"syscall"
@@ -14,15 +15,22 @@ func syncFileData(file *os.File) error {
 	return fsync(file)
 }
 
-// inspectFilesystem maps the statfs magic number, since Linux reports the
-// filesystem type as a number rather than a name and offers no local/remote
-// flag to ask instead. An unrecognised type is named by its magic and treated
-// as local, which is a deliberate trade: refusing every filesystem this table
-// has not heard of would reject new local ones as readily as remote ones,
-// while the exclusion the contract needs is documented rather than enforced.
-// Types known to be network or volatile are listed exhaustively enough to
-// catch what a developer machine actually mounts.
+// inspectFilesystem asks the mount table what the filesystem is called, since
+// Linux offers no local/remote flag to ask directly and statfs reports only a
+// magic number. A name can be classified or refused honestly; a number can
+// only be matched against a list of numbers, which is how an unlisted network
+// filesystem passes for a local one.
+//
+// The magic table remains as the fallback for the case where the mount table
+// cannot be read — a chroot without /proc, mainly. There an unrecognised
+// magic still counts as local, because refusing every filesystem a list of
+// numbers has not heard of would reject new local ones as readily as remote
+// ones, and a number carries nothing an error message could act on.
 func inspectFilesystem(dir string) (filesystem, error) {
+	if named, err := inspectMountTable(dir); err != nil || named.name != "" {
+		return named, err
+	}
+
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err != nil {
 		return filesystem{}, err
@@ -34,6 +42,37 @@ func inspectFilesystem(dir string) (filesystem, error) {
 	// unknown local filesystem. Narrowing to uint32 makes both widths agree;
 	// every magic is a 32-bit value, so nothing is lost on the wider one.
 	return filesystemForMagic(uint32(stat.Type)), nil
+}
+
+// inspectMountTable classifies by the name the kernel publishes for the mount
+// holding this device. It reports an empty filesystem when the table is
+// unreadable or holds no matching mount, leaving the caller on the magic
+// fallback, and an error when the table names a filesystem no list here knows.
+func inspectMountTable(dir string) (filesystem, error) {
+	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return filesystem{}, nil
+	}
+
+	// The mount table is keyed by the device a file reports, which statfs does
+	// not carry — st_dev comes from stat(2).
+	device, err := deviceOf(dir)
+	if err != nil {
+		return filesystem{}, err
+	}
+
+	major, minor := linuxDeviceNumbers(device)
+	name := mountTypeForDevice(mountinfo, major, minor)
+	if name == "" {
+		return filesystem{}, nil
+	}
+
+	known, ok := classifyMountType(name)
+	if !ok {
+		return filesystem{}, fmt.Errorf("%w: %q", ErrUnknownFilesystem, name)
+	}
+
+	return known, nil
 }
 
 func filesystemForMagic(magic uint32) filesystem {
